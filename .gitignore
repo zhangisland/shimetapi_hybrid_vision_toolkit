@@ -2,6 +2,7 @@
 build/
 _build/
 out/
+__pycache__/
 
 # Compiled objects
 *.o

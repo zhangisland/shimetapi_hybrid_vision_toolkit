@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HVS / RDK-X5: build, record, graceful stop, playback and diagnosis."""
+"""HVS / RDK-X5: build, record, graceful stop, playback, CSV/NPZ export and diagnosis."""
 import argparse
 import math
 import os
@@ -53,6 +53,8 @@ def check_build_targets(build, targets):
     if missing:
         hint = ('Recorder target missing: check the root/samples CMakeLists.txt registration.'
                 if 'hv_hvs_record' in missing else
+                'CSV converter target missing: check samples/cpp/hvs_raw_to_csv and its CMake registration.'
+                if 'hv_hvs_raw_to_csv' in missing else
                 'Player target missing: install OpenCV development libraries and reconfigure, '
                 'or build without --with-player for recording only.')
         raise RuntimeError('CMake did not generate: ' + ', '.join(missing) + '. ' + hint)
@@ -110,6 +112,11 @@ def main(argv=None):
                    help='Demosaic preserved Bayer8 samples; compare shows all four CFA patterns')
     p.add_argument('--speed', type=number, default=1)
     p.add_argument('--dump-timestamps', action='store_true', help='Inspect without a GUI')
+    for kind in ('csv', 'npz'):
+        c = sub.add_parser('export-' + kind, help='Decode hvs_record RAW8 to ' + kind.upper())
+        c.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
+        c.add_argument('--input', type=Path, required=True, help='events.raw produced by hvs_record')
+        c.add_argument('--output', type=Path, required=True, help='New output file; must not exist')
     d = sub.add_parser('diagnose', help='Read-only platform/library checks')
     d.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     args = parser.parse_args(argv)
@@ -139,11 +146,14 @@ def main(argv=None):
         if not args.cross and platform.machine().lower() not in ('aarch64', 'arm64'):
             parser.error('On an x86 Linux host use --cross for X5')
         check_record_sources(ROOT)
+        csv_dir = ROOT / 'samples/cpp/hvs_raw_to_csv'
+        if not all((csv_dir / name).is_file() for name in ('main.cpp', 'CMakeLists.txt', 'export_npz.py')):
+            raise RuntimeError('Incomplete CSV converter sources: copy samples/cpp/hvs_raw_to_csv')
         command = ['cmake', '-S', ROOT, '-B', build, '-DHV_TOOLKIT_ARCH=x5', '-DBUILD_SAMPLES=ON']
         if args.cross:
             command.append('-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'toolchains/toolchain-aarch64-linux-gnu.cmake'))
         run(command)
-        targets = ['hv_hvs_record']
+        targets = ['hv_hvs_record', 'hv_hvs_raw_to_csv']
         if args.with_player:
             targets.append('hv_sample_player')
         check_build_targets(build, targets)
@@ -160,6 +170,20 @@ def main(argv=None):
                 subprocess.run(command, env=runtime_env(), check=False)
             except OSError as exc:
                 print(exc)
+        return 0
+    if args.command in ('export-csv', 'export-npz'):
+        source, destination = args.input.resolve(), args.output.resolve()
+        if not source.is_file() or not source.stat().st_size:
+            raise RuntimeError('Missing or empty input events.raw')
+        if destination.exists():
+            raise RuntimeError('Output exists; choose a NEW output file to prevent overwrite')
+        binary = executable(build, 'hv_hvs_raw_to_csv', 'hvs_raw_to_csv')
+        if args.command == 'export-npz':
+            helper = ROOT / 'samples/cpp/hvs_raw_to_csv/export_npz.py'
+            run([sys.executable, helper, '--decoder', binary, '--input', source,
+                 '--output', destination], env=runtime_env())
+        else:
+            run([binary, source, destination], env=runtime_env())
         return 0
     folder = args.output.resolve()
     if args.command == 'record':
