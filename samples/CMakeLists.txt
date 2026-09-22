@@ -5,6 +5,7 @@
 add_subdirectory(cpp/get_started)
 add_subdirectory(cpp/callback)
 add_subdirectory(cpp/record)
+add_subdirectory(cpp/hvs_record)
 add_subdirectory(cpp/viewer)
 add_subdirectory(cpp/bench_hw)
 add_subdirectory(cpp/live_record_display)

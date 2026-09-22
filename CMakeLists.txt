@@ -117,9 +117,12 @@ add_custom_target(bundle_libs
 # bundle_libs 已覆盖三个架构共用的复制 + 三层符号链（x5 同 s100 的 hvs 依赖）。
 # 样例构建后自动捆绑（样例链接的 IMPORTED 库在 lib/，运行时才需要 build/ 里的拷贝）
 if(BUILD_SAMPLES)
-    add_dependencies(bundle_libs
-        hv_sample_get_started hv_sample_callback hv_sample_record hv_sample_viewer
-        hv_sample_bench_hw hv_sample_live_record_display hv_sample_player)
+    foreach(_sample hv_sample_get_started hv_sample_callback hv_sample_record hv_sample_viewer
+            hv_sample_bench_hw hv_sample_live_record_display hv_sample_player hv_hvs_record)
+        if(TARGET ${_sample})
+            add_dependencies(bundle_libs ${_sample})
+        endif()
+    endforeach()
 endif()
 add_custom_target(all_samples ALL DEPENDS bundle_libs)
 
