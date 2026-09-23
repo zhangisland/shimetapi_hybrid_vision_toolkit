@@ -37,6 +37,20 @@ python3 hvs.py export-npz --input /app/recordings/test_vin03/events.raw --output
 
 
 
+## ISP流程Debug
+尝试对原始采集的RAW（NV12, rawvideo, 1632x1224, 420采样）进行离线ISP调参，找到适合当前HVS芯片的ISP处理流程
+
+正常流程是:
+1. 采集到RAW (目前是NV12, rawvideo, 1632x1224, 420采样) avi 视频
+2. [extract] 从录像提取一帧 Bayer（Y 平面）：优先 ffmpeg，无 ffmpeg 自动用纯 Python AVI 解析
+   1. `python aps_isp_tuner.py extract --width 1632 --height 1224 --avi aps.avi --frame 100 --out aps.raw`  # 从aps.avi中抽取第100帧raw
+3. [dump-config] 导出默认参数 JSON，用于后续ISP调参
+   1. `python aps_isp_tuner.py dump-config --out isp_params.json`
+4. [process] 用完整ISP链路处理第2步提前的raw帧, 得到可视的RGB彩色图像(.png), 常规bayer像素阵列包括['rggb', 'bggr', 'grbg', 'gbrg'], 其中海康工业相机采用的是rggb，而当前HVS的输出是gbrg
+   1. `python aps_isp_tuner.py process --config isp_params.json --input aps.raw --width 1632 --height 1224 --bayer gbrg --out out.png`  
+5. 其他
+   1. [stats] 统计raw帧中不同颜色通道的饱和像素和极暗像素（用于评估black_level设置是否合理）占比: `python aps_isp_tuner.py stats --width 1632 --height 1224 --input frame30.raw`
+
 
 ## 其他预先流程
 
@@ -44,7 +58,11 @@ python3 hvs.py export-npz --input /app/recordings/test_vin03/events.raw --output
 1. 下载 [RDK Studio](https://developer.d-robotics.cc/rdkstudio)
 2. 下载 镜像 .img 文件：[shimetapi_rdk_x5_v3.4.1_v2.1.img](https://pan.baidu.com/s/1uscQDdj84pvjso4FKFYgfQ?pwd=iiwn)
 3. 安装RDK Studio后，选择`设备与开发`->`系统烧录`
-4. 其他
+
+# 以下是原始仓库README的部分内容
+
+---
+
 
 # 01 HV Toolkit
 > 本仓库为**预编译二进制发布版**（核心以 `.so` 闭源交付，仅公开头文件与示例源码）。
@@ -170,3 +188,5 @@ shimetapi_Hybrid_vision_toolkit/
 在线技术社区：https://forum.shimetapi.cn
 
 **HV Toolkit** - 让事件相机开发更简单 🚀
+
+

@@ -1,0 +1,37 @@
+{
+  "black_level": 0,
+  "wb_mode": "gray_world",
+  "wb_patch": [
+    800,
+    100,
+    200,
+    200
+  ],
+  "wb_gains": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "wb_gain_min": 0.25,
+  "wb_gain_max": 4.0,
+  "ccm": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "gamma": 2.2,
+  "saturation": 1.0,
+  "brightness": 1.0
+}
