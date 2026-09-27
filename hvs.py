@@ -35,7 +35,8 @@ def check_record_sources(root):
                 'samples/cpp/hvs_record/CMakeLists.txt', 'samples/cpp/hvs_record/main.cpp',
                 'samples/cpp/hvs_record/dual_stream_writer.h',
                 'samples/cpp/hvs_record/recording_storage.h',
-                'samples/cpp/hvs_record/aps_metadata.h']
+                'samples/cpp/hvs_record/aps_metadata.h',
+                'samples/cpp/hvs_record/avi_timing.h']
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise RuntimeError('Incomplete HVS source deployment: missing ' + ', '.join(missing) +

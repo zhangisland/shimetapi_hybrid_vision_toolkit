@@ -2,6 +2,7 @@
 #include "dual_stream_writer.h"
 #include "recording_storage.h"
 #include "aps_metadata.h"
+#include "avi_timing.h"
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -82,6 +83,9 @@ struct Recorder {
     bool active = false, limit = false;
     std::string error;
     uint64_t packets = 0, aps = 0, payload = 0, evsBytes = 0, paired = 0, gray = 0;
+    std::vector<uint8_t> nv12;
+    Clock::time_point firstApsReceived{}, lastApsReceived{};
+    double callbackWorkMs = 0, callbackWorkMaxMs = 0;
     Clock::time_point lastEvs = Clock::now(), lastAps = Clock::now();
     // Retained owners prevent the pool from reusing the previous buffer address.
     std::shared_ptr<uint8_t[]> lastEvsOwner, lastApsOwner;
@@ -89,6 +93,7 @@ struct Recorder {
     const uint8_t* lastApsPtr = nullptr;
     explicit Recorder(const Options& o) : opt(o) {}
     void consume(const Shimeta::Frame& source) noexcept {
+        const auto received = Clock::now();
         std::lock_guard<std::mutex> lock(mutex);
         if (!active || !error.empty() || limit) return;
         try {
@@ -100,18 +105,18 @@ struct Recorder {
             if (!newEvs) f.evs = {};
             if (!newAps) f.aps = {};
             if (!newEvs && !newAps) return;
-            std::vector<uint8_t> nv12;
+
             if (newAps) {
                 if (f.width != opt.width || f.height != opt.height)
                     throw std::runtime_error("APS dimensions differ from --aps-width/--aps-height: " +
                         std::to_string(f.width) + "x" + std::to_string(f.height));
                 const size_t pixels = size_t(f.width) * f.height;
                 if (f.format == Shimeta::PixelFormat::Gray8 && f.aps.size == pixels) {
-                    nv12.assign(pixels * 3 / 2, 128);
+                    nv12.resize(pixels * 3 / 2, 128);
                     std::copy_n(f.aps.data, pixels, nv12.data());
                     f.aps = {nv12.data(), nv12.size()};
                     f.format = Shimeta::PixelFormat::NV12;
-                    ++gray;
+
                 } else if (f.format != Shimeta::PixelFormat::NV12 || f.aps.size != pixels * 3 / 2) {
                     throw std::runtime_error("APS must be packed NV12 or Gray8; padded/unknown format rejected");
                 }
@@ -131,10 +136,17 @@ struct Recorder {
                 const auto count = writer.apsFrameCount();
                 if (count != aps + 1) throw std::runtime_error("Writer did not append exactly one APS frame");
                 aps = count; lastAps = now;
-                writeApsMetadata(metadata, aps - 1, source);
+                if (aps == 1) firstApsReceived = received;
+                lastApsReceived = received;
+                if (source.format == Shimeta::PixelFormat::Gray8) ++gray;
+                writeApsMetadata(metadata, aps - 1, source, {},
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(received.time_since_epoch()).count());
                 if (ts) ++paired;
                 lastApsOwner = source.aps_owner; lastApsPtr = source.aps.data;
             }
+            const double work = std::chrono::duration<double,std::milli>(Clock::now()-received).count();
+            callbackWorkMs += work;
+            callbackWorkMaxMs = std::max(callbackWorkMaxMs, work);
         } catch (const std::exception& e) { error = e.what(); }
         catch (...) { error = "Unknown exception in recording callback"; }
     }
@@ -204,6 +216,18 @@ static int run(const Options& o) {
     if (startAttempted) camera.StopStream();
     if (initialized) camera.Destroy();
     r.writer.close();
+    double measuredFps = 0;
+    if (r.aps > 1) {
+        const double span = std::chrono::duration<double>(r.lastApsReceived-r.firstApsReceived).count();
+        if (span > 0) measuredFps = double(r.aps-1)/span;
+    }
+    if (measuredFps > 0) {
+        try {
+            setAviFrameRate(storage.data / "aps.avi", measuredFps);
+            std::cout << "APS observed callback FPS=" << measuredFps
+                      << "; AVI timing corrected (host timing, not sensor timing)" << std::endl;
+        } catch (const std::exception& e) { r.error += std::string("; ") + e.what(); }
+    }
     if (r.metadata.is_open()) {
         r.metadata.close();
         if (!r.metadata) r.error += "; APS metadata close failed";
@@ -230,6 +254,10 @@ static int run(const Options& o) {
             << "\naps_paired_timestamps=" << r.paired << "\ngray8_frames=" << r.gray
             << "\nevs_width=" << o.evsWidth << "\nevs_height=" << o.evsHeight
             << "\naps_width=" << o.width << "\naps_height=" << o.height
+            << "\naps_observed_fps=" << measuredFps
+            << "\naps_avi_timing_source=" << (measuredFps > 0 ? "host_callback_average" : "default_30_insufficient_frames")
+            << "\ncallback_work_total_ms=" << r.callbackWorkMs
+            << "\ncallback_work_max_ms=" << r.callbackWorkMaxMs
             << "\naps_storage_format=NV12"
             << "\naps_metadata_file=aps.frames.jsonl"
             << "\naps_exposure_status=unavailable"

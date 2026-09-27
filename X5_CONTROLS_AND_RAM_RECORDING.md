@@ -101,3 +101,15 @@ bash scripts/play.sh --output /app/recordings/ram03 --aps-bayer gbrg
 此前将默认 Bayer 设置为 none 会跳过已存在的彩色重建。现在 hvs.py play 默认为 --aps-bayer auto，scripts/play.sh 沿用它：summary 中 aps_frames>0 且 gray8_frames==aps_frames 时，采用项目原有 gbrg 预设，调用 samples/cpp/player 的原有去马赛克/ISP 路径；NV12 或来源不明时不执行 Bayer 重建。auto 是格式路由，不是从图像识别 CFA。显式 --aps-bayer none/其他排列仍优先。
 
 这取代上文“默认按 NV12 播放”的说明。仅更新 hvs.py 和 scripts/play.sh 即可使用新默认值；C++ 彩色算法未改动。
+
+## AVI 时间轴修正
+
+用户 ram03 的 4 秒/55 帧约为 13.75 FPS，而 SDK 的 HybridWriter 默认 AVI 头为 30 FPS，造成普通播放器约 2.18 倍速。新录制在关闭 AVI 后、落盘前，以 (APS帧数-1)/(最后接收时刻-首次接收时刻) 修正 avih 的帧间隔和视频 strh 的 rate/scale；不修改图像字节和 tsmp。该值是主机回调平均 FPS，不是 sensor 帧率。RIFF 结构或写入校验失败则录制状态为 failed。
+
+aps.frames.jsonl 新增 host_receive_monotonic_ns，取回调进入时的 steady_clock 时间，并明确标注 host_callback_not_sensor_exposure。它可用于分析帧间隔，但不替代传感器时间戳或精确 APS/EVS 同步。AVI 仍为固定帧率，反映平均间隔，不能还原不规则停顿。首末边界等待时间不计入平均间隔。
+
+summary 新增 aps_observed_fps、aps_avi_timing_source、callback_work_total_ms、callback_work_max_ms。回调耗时包含等锁、转换及写文件；尚未拆分 SDK 内部耗时，不能据此断言硬件丢帧。Gray8 转 NV12 改为复用缓冲，并修正达到大小上限时 Gray8 计数提前增加的问题。
+
+重新执行 python3 hvs.py build，再用原 --x5-vin-bypass 命令录到新目录。旧 ram03 不会被自动改写。单帧文件因无法估计间隔，保留默认头并在 summary 标注不足以估计。
+
+用户确认无额外传感器驱动源码。当前工程仍无法完成旁路曝光控制或读取逐帧曝光；需要厂商提供支持 APX003CC 的有效 setter/getter、单位/范围及帧关联信息，或提供可修改的后端源码。不能用软件亮度代替曝光。

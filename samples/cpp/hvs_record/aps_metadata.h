@@ -15,12 +15,16 @@ struct ApsExposure {
 };
 inline void writeApsMetadata(std::ostream& out, uint64_t index,
                              const Shimeta::Frame& source,
-                             const ApsExposure& exposure = {}) {
+                             const ApsExposure& exposure = {},
+                             int64_t hostReceiveNs = -1) {
     if (exposure.actualUs && (!std::isfinite(*exposure.actualUs) || *exposure.actualUs <= 0))
         throw std::invalid_argument("Invalid frame exposure duration");
     out.imbue(std::locale::classic());
     out << std::setprecision(17)
         << "{\"schema_version\":1,\"aps_frame_index\":" << index
+        << ",\"host_receive_monotonic_ns\":";
+    if (hostReceiveNs >= 0) out << hostReceiveNs; else out << "null";
+    out << ",\"timestamp_source\":\"host_callback_not_sensor_exposure\""
         << ",\"width\":" << source.width << ",\"height\":" << source.height
         << ",\"source_format\":\"" << (source.format == Shimeta::PixelFormat::Gray8 ? "Gray8" : "NV12")
         << "\",\"storage_format\":\"NV12\",\"exposure_time_us\":";

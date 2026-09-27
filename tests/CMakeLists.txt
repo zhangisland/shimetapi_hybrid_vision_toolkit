@@ -52,3 +52,6 @@ add_test(NAME aps_metadata_test COMMAND aps_metadata_test)
 if(MSVC)
  target_compile_options(aps_metadata_test PRIVATE /utf-8)
 endif()
+
+add_executable(avi_timing_test test_avi_timing.cpp)
+add_test(NAME avi_timing_test COMMAND avi_timing_test)

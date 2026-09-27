@@ -9,7 +9,8 @@ int main() {
     require(unknown.str().find("sdk_frame_has_no_exposure")!=std::string::npos);
     require(unknown.str().find("\"paired_evs_timestamp_us\":null")!=std::string::npos);
     f.format=Shimeta::PixelFormat::Gray8; f.aps_evs_ts.valid=true; f.aps_evs_ts.processed_timestamp=123456;
-    std::ostringstream known; writeApsMetadata(known,1,f,ApsExposure{5000.25});
+    std::ostringstream known; writeApsMetadata(known,1,f,ApsExposure{5000.25},987654321);
+    require(known.str().find("987654321")!=std::string::npos);
     require(known.str().find("\"exposure_time_us\":5000.25")!=std::string::npos);
     require(known.str().find("\"aps_frame_index\":1")!=std::string::npos);
     require(known.str().find("Gray8")!=std::string::npos);
