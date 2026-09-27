@@ -65,8 +65,11 @@ int main(int argc, char** argv) {
     std::string avi_path = argv[2];
     bool dump_timestamps = false;
     double fallback_fps = 30.0, speed = 1.0;
+    ApsIsp isp;
     int numeric_arg = 0;
+    try {
     for (int i = 3; i < argc; ++i) {
+        if (apsOption(argv[i], i, argc, argv, isp)) continue;
         if (std::strcmp(argv[i], "--dump-timestamps") == 0) {
             dump_timestamps = true;
         } else if (numeric_arg++ == 0) {
@@ -78,6 +81,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    } catch(const std::exception& e) { std::cerr << e.what() << std::endl; return 1; }
     if (fallback_fps <= 0.0 || speed <= 0.0) { printUsage(argv[0]); return 1; }
     if (dump_timestamps) return dumpTimestamps(raw_path, avi_path, std::cout) ? 0 : 1;
 
@@ -87,6 +91,7 @@ int main(int argc, char** argv) {
 
     // ---- 加载 APS ----
     ApsFrameCache video_cache;
+    video_cache.setIsp(isp);
     if (!video_cache.open(avi_path, fallback_fps)) {
         std::cerr << "Failed to open AVI: " << avi_path << std::endl;
         return 1;

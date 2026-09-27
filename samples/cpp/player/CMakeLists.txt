@@ -13,7 +13,7 @@ if(CMAKE_CROSSCOMPILING)
         target_link_libraries(hv_sample_player PRIVATE
             HVToolkit::shimetapi_io
             HVToolkit::shimetapi_codec
-            opencv_core opencv_imgproc opencv_highgui)
+            opencv_core opencv_imgproc opencv_highgui opencv_imgcodecs)
         # opencv_highgui 依赖 GTK/GStreamer，板端运行时提供，交叉链接时忽略未定义符号
         target_link_options(hv_sample_player PRIVATE -Wl,--allow-shlib-undefined)
         message(STATUS "player: using aarch64 OpenCV from third_party")
@@ -27,6 +27,7 @@ else()
         add_executable(hv_sample_player main.cpp player_widgets.cpp)
         target_link_libraries(hv_sample_player PRIVATE
             HVToolkit::shimetapi_io
+            HVToolkit::shimetapi_codec
             ${OpenCV_LIBS})
         target_include_directories(hv_sample_player PRIVATE ${OpenCV_INCLUDE_DIRS})
     else()

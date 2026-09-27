@@ -9,6 +9,7 @@
 #ifndef HV_LIVE_WIDGETS_H
 #define HV_LIVE_WIDGETS_H
 
+#include "../hvs_record/dual_stream_writer.h"
 #include <mutex>
 #include <string>
 #include <vector>
@@ -59,7 +60,9 @@ public:
     /** @brief 写一帧（录制中才写）。 */
     void writeFrame(const Shimeta::Frame& f, const Shimeta::EvsTimestamp* evs_ts = nullptr);
 private:
-    Shimeta::io::HybridWriter writer_;
+    DualStreamWriter writer_;
+    int width_=0, height_=0;
+    Shimeta::PixelFormat format_{};
     std::string evsPath_;
     std::string apsPath_;
     bool recording_ = false;

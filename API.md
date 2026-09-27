@@ -453,3 +453,9 @@ dec = hv.MipiRaw8Decoder()
 ## 许可证
 
 Apache License 2.0。EVT2/EVT3 编解码为基于公开规范的独立实现（clean-room），不含第三方闭源源码。
+
+### APS 控制限制（随库二进制审计，2026-09-23）
+
+当前分发库的 `Camera::SetExposure(int)` **没有应用参数**，只检查设备指针非空；不能将返回 true 当作曝光已生效。
+`SetFrameRate/GetFrameRate` 控制的是 EVS，不能当作 APS 采集 FPS。公开 API 没有 APS 曝光读回/范围/单位、像素格式选择、增益或硬件 AE/AWB 控制。
+完整能力表、软件 ISP 控制、测试及实机验收见 [APS_CONTROLS.md](APS_CONTROLS.md)。

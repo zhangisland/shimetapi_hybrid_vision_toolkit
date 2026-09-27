@@ -9,6 +9,7 @@
 #ifndef HV_PLAYER_WIDGETS_H
 #define HV_PLAYER_WIDGETS_H
 
+#include "aps_color.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -71,10 +72,12 @@ extern std::atomic<int>      g_pending_action; ///< 待处理动作（鼠标命�
 class VideoReader {
 public:
     bool open(const std::string& path, double fallback_fps);
+    void setIsp(const ApsIsp& isp) { isp_ = isp; }
     double fps() const;
     uint64_t totalFrameCount() const;
     bool readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::EvsTimestamp* timestamp = nullptr);
 private:
+    ApsIsp isp_;
     std::unique_ptr<Shimeta::io::HybridReader> reader_;
     double   fps_ = 30.0, fallback_fps_ = 30.0;
     uint64_t total_frames_ = 0, current_index_ = 0;
@@ -89,6 +92,7 @@ private:
  */
 class ApsFrameCache {
 public:
+    void setIsp(const ApsIsp& isp) { reader_.setIsp(isp); }
     bool open(const std::string& path, double fallback_fps);
     double fps() const;
     size_t frameCount() const;

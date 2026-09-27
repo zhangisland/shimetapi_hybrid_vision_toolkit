@@ -1,5 +1,6 @@
 #include <shimetapi/hv/camera.h>
 #include "dual_stream_writer.h"
+#include "recording_storage.h"
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -20,6 +21,8 @@ static volatile std::sig_atomic_t stopping = 0;
 static void onSignal(int) { stopping = 1; }
 struct Options {
     fs::path output;
+    fs::path ramRoot = "/dev/shm";
+    bool memory = true;
     double seconds = 0, timeout = 10;
     int width = 1632, height = 1224;
     int evsWidth = 768, evsHeight = 608;
@@ -31,7 +34,7 @@ static Options parse(int argc, char** argv) {
         std::string key = argv[i];
         if (key == "--help") {
             std::cout << "hv_hvs_record --output NEW_DIRECTORY [--seconds 0] [--timeout 10] "
-                         "[--aps-width 1632 --aps-height 1224] [--evs-width 768 --evs-height 608] [--max-mib 1024]\n"
+                         "[--aps-width 1632 --aps-height 1224] [--evs-width 768 --evs-height 608] [--max-mib 1024] [--storage memory|disk] [--ram-dir /dev/shm]\n"
                          "Stop: SIGINT, SIGTERM, or create NEW_DIRECTORY/stop.request\n";
             std::exit(0);
         }
@@ -39,6 +42,13 @@ static Options parse(int argc, char** argv) {
         const std::string value = argv[i];
         size_t used = 0;
         if (key == "--output") { o.output = value; continue; }
+        if (key == "--ram-dir") { o.ramRoot = value; continue; }
+        if (key == "--storage") {
+            if (value == "disk") o.memory = false;
+            else if (value == "memory") o.memory = true;
+            else throw std::runtime_error("storage must be memory or disk");
+            continue;
+        }
         const double n = std::stod(value, &used);
         if (used != value.size() || !std::isfinite(n)) throw std::runtime_error("Invalid number: " + value);
         if (key == "--seconds") o.seconds = n;
@@ -58,6 +68,8 @@ static Options parse(int argc, char** argv) {
     }
     if (o.output.empty() || o.seconds < 0 || o.timeout <= 0)
         throw std::runtime_error("Require --output, seconds >= 0, timeout > 0");
+    if (!o.memory) o.ramRoot.clear();
+    else if (o.ramRoot.empty()) throw std::runtime_error("RAM directory cannot be empty");
     return o;
 }
 struct Recorder {
@@ -125,6 +137,8 @@ struct Recorder {
 };
 static int run(const Options& o) {
     if (!fs::create_directory(o.output)) throw std::runtime_error("Output directory already exists");
+    RecordingStorage storage(o.output, o.ramRoot, o.maxBytes);
+    std::cout << "Recording data directory: " << storage.data << std::endl;
     Recorder r(o);
     Shimeta::hv::Camera camera;
     std::signal(SIGINT, onSignal);
@@ -132,7 +146,7 @@ static int run(const Options& o) {
     bool initialized = false, startAttempted = false;
     std::string reason = "stop";
     try {
-        if (!r.writer.open((o.output / "events.raw").string(), (o.output / "aps.avi").string(),
+        if (!r.writer.open((storage.data / "events.raw").string(), (storage.data / "aps.avi").string(),
                            o.evsWidth, o.evsHeight, o.width, o.height)) throw std::runtime_error("Cannot open recording files");
         std::cout << "EVS geometry=" << o.evsWidth << "x" << o.evsHeight
                   << ", APS geometry=" << o.width << "x" << o.height << std::endl;
@@ -154,6 +168,10 @@ static int run(const Options& o) {
             std::lock_guard<std::mutex> lock(r.mutex);
             if (!r.error.empty()) break;
             if (r.limit) { reason = "size_limit"; break; }
+            if (storage.memory && (fs::space(storage.data).available < 32ULL * 1024 * 1024 ||
+                                   RecordingStorage::availableMemory() < 64ULL * 1024 * 1024)) {
+                reason = "ram_space_limit"; break;
+            }
             if (std::chrono::duration<double>(now - r.lastEvs).count() > o.timeout ||
                 std::chrono::duration<double>(now - r.lastAps).count() > o.timeout) {
                 r.error = "APS or EVS absent/stalled; inspect MIPI/ISP logs and X5 runtime libraries";
@@ -176,11 +194,19 @@ static int run(const Options& o) {
     if (initialized) camera.Destroy();
     r.writer.close();
     if (r.error.empty() && (!r.packets || !r.aps)) r.error = "Incomplete HVS recording: one or both streams have zero frames";
-    if (r.error.empty() && (fs::file_size(o.output / "events.raw") <= r.evsBytes ||
-        fs::file_size(o.output / "aps.avi") < r.aps * uint64_t(o.width) * o.height * 3 / 2))
+    if (r.error.empty() && (fs::file_size(storage.data / "events.raw") <= r.evsBytes ||
+        fs::file_size(storage.data / "aps.avi") < r.aps * uint64_t(o.width) * o.height * 3 / 2))
         r.error = "Output size check failed";
+    try {
+        std::cout << "Capture stopped; finalizing recording files..." << std::endl;
+        storage.publish();
+    } catch (const std::exception& e) {
+        r.error += std::string("; finalization failed: ") + e.what() +
+                   "; recovery data: " + storage.data.string();
+    }
     std::ofstream summary(o.output / "summary.tmp");
     summary << "status=" << (r.error.empty() ? "complete" : "failed") << '\n'
+            << "storage=" << (storage.memory ? "memory" : "disk") << '\n'
             << "reason=" << (r.error.empty() ? reason : r.error) << '\n'
             << "evs_packets=" << r.packets << "\naps_frames=" << r.aps
             << "\naps_paired_timestamps=" << r.paired << "\ngray8_frames=" << r.gray

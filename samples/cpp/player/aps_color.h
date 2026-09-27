@@ -1,115 +1,174 @@
 #pragma once
+#include "../common/aps_core.h"
 #include <shimetapi/core/frame.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
-#include <algorithm>
-#include <stdexcept>
-#include <string>
-
+#include <opencv2/imgcodecs.hpp>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
 namespace hv_player {
-inline bool validApsBayerMode(const std::string& mode) {
-    return mode=="none" || mode=="rggb" || mode=="bggr" ||
-           mode=="grbg" || mode=="gbrg" || mode=="compare";
+inline bool validApsBayerMode(const std::string& m) {
+    return m=="none" || m=="rggb" || m=="bggr" || m=="grbg" || m=="gbrg" || m=="compare";
 }
-inline int apsBayerCode(const std::string& mode) {
-    // OpenCV's legacy two-letter BGR aliases are counterintuitive:
-    // RGGB2BGR == BG2BGR. These aliases also work with the bundled older headers.
-    if (mode=="rggb") return cv::COLOR_BayerBG2BGR;
-    if (mode=="bggr") return cv::COLOR_BayerRG2BGR;
-    if (mode=="grbg") return cv::COLOR_BayerGB2BGR;
-    if (mode=="gbrg") return cv::COLOR_BayerGR2BGR;
-    throw std::invalid_argument("Unknown Bayer pattern: " + mode);
+inline int apsBayerCode(const std::string& m) {
+    if(m=="rggb") return cv::COLOR_BayerBG2BGR;
+    if(m=="bggr") return cv::COLOR_BayerRG2BGR;
+    if(m=="grbg") return cv::COLOR_BayerGB2BGR;
+    if(m=="gbrg") return cv::COLOR_BayerGR2BGR;
+    throw std::invalid_argument("Invalid Bayer pattern: "+m);
 }
-
-// The recording stores unprocessed Bayer RAW (VIN RAW10 >> 2 as Gray8):
-// no black-level subtraction, no white balance, no gamma. Demosaicing
-// alone therefore shows a strongly tinted, dark image. These parameters
-// approximate what a real ISP would do before color output.
-struct ApsColorEnhance {
-    double black_level = 16.0;   // sensor RAW10 BL ~64 after >>2
-    bool gray_world_wb = true;   // per-frame gray-world white balance
-    double wb_gain_min = 0.25;   // clamp per-channel gains
-    double wb_gain_max = 4.0;
-    double gamma = 0.4545;       // 1/2.2, lifts shadows
+inline int channel(const std::string& p,int y,int x) {
+    static const int c[4][4]={{0,1,1,2},{2,1,1,0},{1,0,2,1},{1,2,0,1}};
+    int n=p=="rggb"?0:p=="bggr"?1:p=="grbg"?2:3;
+    return c[n][(y%2)*2+x%2];
+}
+struct ApsIsp {
+    hv_aps::Config config;
+    hv_aps::WhiteBalance wb;
+    std::string pattern="none", geometry;
+    cv::Mat raw,black,balanced,linear,display;
+    double saturated=0; uint64_t frames=0;
+    ApsIsp() { wb.setMode(config.mode,config,false); }
+    void load(const std::string& path) {
+        cv::FileStorage f(path,cv::FileStorage::READ);
+        if(!f.isOpened()) throw std::runtime_error("Cannot read ISP config: "+path);
+        const std::vector<std::string> allowed={"schema_version","black_level","gamma","wb_mode","wb_gains","wb_gain_min","wb_gain_max","wb_patch","brightness","saturation","ccm"};
+        for(auto it=f.root().begin();it!=f.root().end();++it)
+            if(std::find(allowed.begin(),allowed.end(),(*it).name())==allowed.end())
+                throw std::invalid_argument("Unknown ISP config key: "+(*it).name());
+        if(!f["schema_version"].empty() && int(f["schema_version"])!=1) throw std::invalid_argument("Unsupported ISP config version");
+        auto c=config;
+        if(!f["black_level"].empty()) f["black_level"]>>c.black;
+        if(!f["gamma"].empty()) f["gamma"]>>c.gamma;
+        if(!f["wb_mode"].empty()) f["wb_mode"]>>c.mode;
+        if(c.mode=="gray_world") c.mode="continuous"; // old tuner configuration
+        if(!f["wb_gain_min"].empty()) f["wb_gain_min"]>>c.minimum;
+        if(!f["wb_gain_max"].empty()) f["wb_gain_max"]>>c.maximum;
+        if(!f["wb_gains"].empty()) {
+            std::vector<double> v; f["wb_gains"]>>v;
+            if(v.size()!=3) throw std::invalid_argument("wb_gains must contain RGB");
+            std::copy(v.begin(),v.end(),c.gains.begin());
+        }
+        // Do not silently ignore legacy artistic/calibration adjustments.
+        for(const char* key:{"brightness","saturation"}) if(!f[key].empty() && double(f[key])!=1)
+            throw std::invalid_argument(std::string(key)+" is only supported by the offline tuner");
+        if(!f["ccm"].empty()) {
+            auto rows=f["ccm"];
+            if(rows.size()!=3) throw std::invalid_argument("CCM must be 3x3");
+            for(int y=0;y<3;++y) {
+                if(rows[y].size()!=3) throw std::invalid_argument("CCM must be 3x3");
+                for(int x=0;x<3;++x) if(double(rows[y][x])!=(x==y?1.:0.))
+                    throw std::invalid_argument("Non-identity CCM requires offline calibrated processing");
+            }
+        }
+        c.validate(); config=c; wb.setMode(c.mode,c,false);
+    }
+    void mode(const std::string& m) {
+        if(pattern=="none" || pattern=="compare") { std::cerr<<"Software WB requires one explicit Bayer pattern; not applied"<<std::endl; return; }
+        wb.setMode(m,config); config.mode=m;
+        if(m=="manual") config.gains=wb.gains;
+    }
+    cv::Mat process(const Shimeta::Frame& f) {
+        config.validate();
+        if(!validApsBayerMode(pattern) || f.width<4 || f.height<4 || f.width%2 || f.height%2 || !f.aps.data)
+            throw std::runtime_error("Invalid APS geometry/Bayer mode");
+        size_t n=size_t(f.width)*size_t(f.height);
+        bool gray=f.format==Shimeta::PixelFormat::Gray8;
+        if((!gray && f.format!=Shimeta::PixelFormat::NV12) || f.aps.size!=(gray?n:n*3/2))
+            throw std::runtime_error("APS requires exact packed Gray8/NV12; stride/padding unknown");
+        std::string next=std::to_string(f.width)+"x"+std::to_string(f.height)+(gray?" Gray8":" NV12")+pattern;
+        if(next!=geometry) { geometry=next; wb.setMode(config.mode,config,false); raw.release(); }
+        cv::Mat y(f.height,f.width,CV_8UC1,const_cast<uint8_t*>(f.aps.data));
+        if(pattern=="none") {
+            raw.release(); black.release(); balanced.release(); linear.release();
+            if(gray) cv::cvtColor(y,display,cv::COLOR_GRAY2BGR);
+            else {
+                cv::Mat uv(f.height/2,f.width/2,CV_8UC2,const_cast<uint8_t*>(f.aps.data+n));
+                cv::cvtColorTwoPlane(y,uv,display,cv::COLOR_YUV2BGR_NV12);
+            }
+            return display;
+        }
+        if(!gray && !std::all_of(f.aps.data+n,f.aps.data+n*3/2,[](uint8_t v){return v==128;}))
+            throw std::runtime_error("Bayer requires preserved Y samples with neutral UV; hardware ISP output rejected");
+        if(pattern=="compare") {
+            cv::Mat result=cv::Mat::zeros(f.height,f.width,CV_8UC3);
+            const char* patterns[]={"rggb","bggr","grbg","gbrg"};
+            for(int i=0;i<4;++i) {
+                ApsIsp candidate; candidate.config=config; candidate.config.mode="off"; candidate.pattern=patterns[i];
+                cv::Mat tile; cv::resize(candidate.process(f),tile,cv::Size(f.width/2,f.height/2));
+                cv::putText(tile,patterns[i],cv::Point(8,24),cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(255,255,255),1);
+                tile.copyTo(result(cv::Rect(i%2*f.width/2,i/2*f.height/2,f.width/2,f.height/2)));
+            }
+            raw.release(); display=result; return display;
+        }
+        raw=y.clone(); // never mutate pool/recorded bytes
+        raw.convertTo(black,CV_32F,1/(255-config.black),-config.black/(255-config.black));
+        cv::max(black,0,black);
+        std::vector<hv_aps::Gains> cells;
+        int step=std::max(2,(f.width/128/2)*2);
+        for(int r=0;r<f.height-1;r+=step) for(int c=0;c<f.width-1;c+=step) {
+            hv_aps::Gains v{0,0,0}; bool clipped=false;
+            for(int dy=0;dy<2;++dy) for(int dx=0;dx<2;++dx) {
+                int ch=channel(pattern,r+dy,c+dx);
+                float sample=black.at<float>(r+dy,c+dx);
+                clipped=clipped || sample>.96 || sample<.03;
+                v[ch]+=sample*(ch==1?.5:1);
+            }
+            if(clipped) v={0,0,0};
+            cells.push_back(v);
+        }
+        wb.update(hv_aps::estimate(cells,config));
+        auto gains=wb.applied(); balanced=black.clone();
+        for(int r=0;r<f.height;++r) for(int c=0;c<f.width;++c)
+            balanced.at<float>(r,c)*=float(gains[channel(pattern,r,c)]);
+        // Headroom scaling preserves highlights through the uint16 demosaicer.
+        double headroom=std::max(1.,*std::max_element(gains.begin(),gains.end()));
+        cv::Mat b16,bgr16; balanced.convertTo(b16,CV_16U,65535/headroom);
+        cv::demosaicing(b16,bgr16,apsBayerCode(pattern));
+        bgr16.convertTo(linear,CV_32F,headroom/65535); // BGR, identity CCM (uncalibrated)
+        saturated=double(cv::countNonZero(raw>=250))/n;
+        cv::Mat encoded; cv::max(linear,0,encoded); cv::min(encoded,1,encoded);
+        cv::pow(encoded,1/config.gamma,encoded); encoded.convertTo(display,CV_8UC3,255);
+        ++frames; return display;
+    }
+    std::string status() const {
+        if(pattern=="none" || pattern=="compare") return geometry+" SW-WB not applied; exposure/gain/device FPS unknown";
+        auto g=wb.applied();
+        return geometry+" SW-WB="+wb.mode+" RGB="+std::to_string(g[0])+","+std::to_string(g[1])+","+std::to_string(g[2])+
+            " samples="+std::to_string(wb.last.samples)+" confidence="+std::to_string(wb.last.confidence)+
+            " sat="+std::to_string(saturated)+" "+wb.status;
+    }
+    void dump(const std::string& directory) const {
+        if(raw.empty()) throw std::runtime_error("Diagnostics require one explicit Bayer pattern and a processed frame");
+        if(!std::filesystem::create_directory(directory)) throw std::runtime_error("Diagnostic directory must be new");
+        auto path=[&](const char* s){return (std::filesystem::path(directory)/s).string();};
+        std::ofstream out(path("derived_bayer8.raw"),std::ios::binary);
+        out.write(reinterpret_cast<const char*>(raw.data),std::streamsize(raw.total())); out.close();
+        if(!out || !cv::imwrite(path("display.png"),display)) throw std::runtime_error("Diagnostic image write failed");
+        cv::FileStorage f(path("stages.yml"),cv::FileStorage::WRITE);
+        if(!f.isOpened()) throw std::runtime_error("Diagnostic write failed");
+        f<<"black_corrected_bayer"<<black<<"white_balanced_bayer"<<balanced<<"linear_bgr_identity_ccm"<<linear;
+        std::ofstream report(path("metadata.txt"));
+        report<<status()<<"\nrequested_WB="<<config.mode<<" black_DN="<<config.black<<" gamma="<<config.gamma<<"\ninput_bits=8; sensor_ADC_bits=unknown; VIN_RAW10_transport_reduced_before_application\n"
+              <<"exposure/gain/device_fps=unknown; not frame metadata\n"<<hv_aps::capabilities()<<'\n';
+        report<<"histogram_DN,count\n";
+        std::array<size_t,256> hist{};
+        for(size_t i=0;i<raw.total();++i) ++hist[raw.data[i]];
+        for(int i=0;i<256;++i) report<<i<<","<<hist[i]<<"\n";
+        report.close(); if(!report) throw std::runtime_error("Diagnostic report write failed");
+    }
 };
-
-inline void enhanceApsColor(cv::Mat& img, const ApsColorEnhance& p) {
-    if (img.empty() || img.type()!=CV_8UC3) return;
-    // 1) Black-level subtraction + full-range stretch via 8-bit LUT.
-    if (p.black_level > 0.0) {
-        const double scale = 255.0 / (255.0 - p.black_level);
-        cv::Mat bl_lut(1, 256, CV_8UC1);
-        for (int i = 0; i < 256; ++i) {
-            double v = (double(i) - p.black_level) * scale;
-            bl_lut.at<uint8_t>(i) = cv::saturate_cast<uint8_t>(v < 0.0 ? 0 : v);
-        }
-        cv::LUT(img, bl_lut, img);
-    }
-    // 2) Gray-world white balance: scale each channel so all channel means
-    // match the green mean. Gains are clamped so a monochrome scene cannot
-    // blow up any channel. WB normalizes the global cast but cannot fix a
-    // wrong Bayer phase (R/B swapped objects stay swapped) -- that is
-    // exactly what makes the compare view a reliable phase test.
-    if (p.gray_world_wb) {
-        cv::Scalar means = cv::mean(img);
-        cv::Mat channels[3];
-        cv::split(img, channels);
-        for (int c = 0; c < 3; ++c) {
-            if (means[c] <= 1.0) continue;
-            double gain = means[1] / means[c];  // normalize to green mean
-            gain = std::min(std::max(gain, p.wb_gain_min), p.wb_gain_max);
-            if (std::abs(gain - 1.0) < 0.01) continue;
-            channels[c].convertTo(channels[c], -1, gain, 0.0);
-        }
-        cv::merge(channels, 3, img);
-    }
-    // 3) Gamma correction via LUT.
-    if (p.gamma > 0.0 && std::abs(p.gamma - 1.0) > 1e-3) {
-        cv::Mat gamma_lut(1, 256, CV_8UC1);
-        for (int i = 0; i < 256; ++i)
-            gamma_lut.at<uint8_t>(i) = cv::saturate_cast<uint8_t>(
-                255.0 * std::pow(double(i) / 255.0, p.gamma));
-        cv::LUT(img, gamma_lut, img);
-    }
-}
-inline cv::Mat decodeApsForDisplay(const Shimeta::Frame& f, const std::string& mode) {
-    if (!validApsBayerMode(mode)) throw std::invalid_argument("Invalid APS Bayer mode");
-    if (f.width<4 || f.height<4 || f.width%2 || f.height%2 ||
-        f.format!=Shimeta::PixelFormat::NV12 || !f.aps.data)
-        throw std::runtime_error("Invalid APS NV12 frame");
-    const size_t pixels=size_t(f.width)*f.height;
-    if (f.aps.size<pixels*3/2) throw std::runtime_error("Truncated APS NV12 frame");
-    cv::Mat y(f.height,f.width,CV_8UC1,const_cast<uint8_t*>(f.aps.data));
-    cv::Mat result;
-    if (mode=="none") {
-        cv::Mat uv(f.height/2,f.width/2,CV_8UC2,const_cast<uint8_t*>(f.aps.data+pixels));
-        cv::cvtColorTwoPlane(y,uv,result,cv::COLOR_YUV2BGR_NV12);
-        return result;
-    }
-    // Our Gray8 recorder copies Bayer8 bytes directly to Y and sets UV to 128.
-    // Demosaic that unscaled Y, before YUV range conversion or image resizing.
-    if (!std::all_of(f.aps.data+pixels,f.aps.data+pixels*3/2,
-                     [](uint8_t v){return v==128;}))
-        throw std::runtime_error("Bayer mode requires untouched Gray8-in-NV12 (neutral UV)");
-    if (mode!="compare") {
-        cv::demosaicing(y,result,apsBayerCode(mode));
-        enhanceApsColor(result, ApsColorEnhance{});
-        return result;
-    }
-    const char* patterns[]={"rggb","bggr","grbg","gbrg"};
-    result=cv::Mat::zeros(f.height,f.width,CV_8UC3);
-    for (int i=0;i<4;++i) {
-        cv::Mat color,tile;
-        cv::demosaicing(y,color,apsBayerCode(patterns[i]));
-        cv::resize(color,tile,cv::Size(f.width/2,f.height/2),0,0,cv::INTER_AREA);
-        enhanceApsColor(tile, ApsColorEnhance{});
-        const std::string label=patterns[i];
-        cv::putText(tile,label,cv::Point(10,28),cv::FONT_HERSHEY_SIMPLEX,
-                    0.7,cv::Scalar(0,0,0),4);
-        cv::putText(tile,label,cv::Point(10,28),cv::FONT_HERSHEY_SIMPLEX,
-                    0.7,cv::Scalar(255,255,255),1);
-        tile.copyTo(result(cv::Rect((i%2)*(f.width/2),(i/2)*(f.height/2),f.width/2,f.height/2)));
-    }
-    return result;
+// Options shared by live preview and playback. Unsupported hardware requests fail before Init.
+inline bool apsOption(const std::string& key,int& i,int argc,char** argv,ApsIsp& isp) {
+    if(key=="--aps-capabilities") { std::cout<<hv_aps::capabilities()<<std::endl; return true; }
+    for(const char* k:{"--aps-exposure-us","--aps-fps","--aps-format","--aps-gain","--aps-ae","--aps-hardware-wb"})
+        if(key==k) hv_aps::rejectHardwareRequest(key);
+    if(key!="--aps-bayer" && key!="--aps-config" && key!="--aps-wb") return false;
+    if(++i>=argc) throw std::invalid_argument("Missing value: "+key);
+    if(key=="--aps-bayer") { isp.pattern=argv[i]; if(!validApsBayerMode(isp.pattern)) throw std::invalid_argument("Invalid Bayer mode"); }
+    if(key=="--aps-config") isp.load(argv[i]);
+    if(key=="--aps-wb") { isp.config.mode=argv[i]; isp.config.validate(); isp.wb.setMode(isp.config.mode,isp.config,false); }
+    return true;
 }
 }

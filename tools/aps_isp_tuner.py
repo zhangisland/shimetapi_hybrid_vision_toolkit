@@ -36,17 +36,12 @@ import os
 import struct
 import subprocess
 import sys
-from loguru import logger
+import logging
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import cv2
 import time
-
-timestr = time.strftime('%Y%m%d%H%M%S')
-logger.add(f'tuning_isp.log')
-
-
-
 
 # OpenCV legacy 枚举映射，与 aps_color.h 保持一致（注意这是反向命名）：
 # rggb->BayerBG2BGR, bggr->BayerRG2BGR, grbg->BayerGB2BGR, gbrg->BayerGR2BGR
@@ -67,7 +62,7 @@ BAYER_MASK = {
 }
 
 DEFAULT_CONFIG = {
-    "black_level": 16.0,          # 8-bit 尺度黑电平；RAW10 BL~64 >>2 = 16，标定方法见 README
+    "black_level": 0.0,          # 未标定默认值；请用遮光黑帧测量，不假定传感器 pedestal
     "wb_mode": "gray_world",      # gray_world | patch | manual
     "wb_patch": [800, 100, 200, 200],  # wb_mode=patch 时白块区域 x,y,w,h（输入分辨率坐标）
     "wb_gains": [1.0, 1.0, 1.0],  # wb_mode=manual 时 [R, G, B] 增益
@@ -89,7 +84,7 @@ def extract_y_plane_ffmpeg(avi_path: str, frame_idx: int, width: int, height: in
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", avi_path,
-        "-vf", "select=eq(n\\,%d)" % frame_idx,
+        "-vf", "select=eq(n\\,%d),extractplanes=y" % frame_idx,
         "-frames:v", "1", "-pix_fmt", "gray",
         "-f", "rawvideo", out_path,
     ]
@@ -138,15 +133,35 @@ def list_avi_frames(avi_path: str):
 
 def extract_y_plane_python(avi_path: str, frame_idx: int, width: int, height: int, out_path: str) -> None:
     """无 ffmpeg 时的回退：假设是无压缩 NV12 AVI，取帧数据前 W*H 字节为 Y 平面。"""
+    if width<4 or height<4 or width%2 or height%2: raise ValueError("Invalid dimensions")
     data, frames = list_avi_frames(avi_path)
-    if frame_idx >= len(frames):
+    def formats(start,end):
+        result=[]
+        while start+8<=end:
+            tag=data[start:start+4]; length=struct.unpack_from("<I",data,start+4)[0]
+            stop=start+8+length
+            if stop>end: raise ValueError("Truncated AVI chunk")
+            if tag==b"LIST" and data[start+8:start+12] in (b"hdrl",b"strl"):
+                result.extend(formats(start+12,stop))
+            elif tag==b"strf" and length>=40:
+                result.append((struct.unpack_from("<ii",data,start+12),data[start+24:start+28]))
+            start=stop+(length&1)
+        return result
+    declared=struct.unpack_from("<I",data,4)[0]+8
+    if declared>len(data): raise ValueError("Truncated RIFF")
+    if ((width,height),b"NV12") not in formats(12,declared):
+        raise ValueError("AVI header must declare requested packed NV12 dimensions")
+    if frame_idx < 0 or frame_idx >= len(frames):
         raise ValueError("帧号 %d 超出范围（共 %d 帧）" % (frame_idx, len(frames)))
     cid, off, size = frames[frame_idx]
+    if off+size>len(data): raise ValueError("Truncated AVI frame")
     need = width * height * 3 // 2
-    if size < need:
+    if size != need:
         raise ValueError("帧数据 %d 字节小于 NV12 帧大小 %d（fourcc=%s）"
                          % (size, need, cid.decode("latin1")))
-    with open(out_path, "wb") as f:
+    if data[off+width*height:off+size] != bytes([128])*(width*height//2):
+        raise ValueError("Not preserved Bayer-in-NV12: non-neutral chroma")
+    with open(out_path, "xb") as f:
         f.write(data[off:off + width * height])
     logger.info("提取到 Y 平面 %d 字节（帧块 %s, %d 字节，共 %d 帧）"
           % (width * height, cid.decode("latin1"), size, len(frames)))
@@ -172,17 +187,44 @@ def compute_wb_gains(raw01: np.ndarray, cfg: dict, pattern: str) -> np.ndarray:
         return np.clip(g, lo, hi)
 
     mode = cfg["wb_mode"]
-    if mode == "gray_world":
-        means = [raw01[ch_map == c].mean() for c in range(3)]
-        g = clamp(np.array([means[1] / m if m > 1e-6 else 1.0 for m in means]))
-        return g / g[1]  # 保持 G 增益为 1
-    if mode == "patch":
-        x, y, w, h = cfg["wb_patch"]
-        patch = raw01[y:y + h, x:x + w]
-        pmap = ch_map[y:y + h, x:x + w]
-        means = [patch[pmap == c].mean() for c in range(3)]
-        g = clamp(np.array([means[1] / m if m > 1e-6 else 1.0 for m in means]))
-        return g / g[1]
+    if mode == "off":
+        return np.ones(3)
+    if mode in ("gray_world", "continuous", "once", "patch"):
+        region, cmap = raw01, ch_map
+        if mode == "patch":
+            x, y, w, h = cfg["wb_patch"]
+            if any(not isinstance(v, int) for v in (x,y,w,h)) or x<0 or y<0 or w<2 or h<2 or x+w>raw01.shape[1] or y+h>raw01.shape[0]:
+                raise ValueError("WB patch outside image")
+            region, cmap = raw01[y:y+h,x:x+w], ch_map[y:y+h,x:x+w]
+        # Match RGB samples in 2x2 cells; exclude entire clipped/dark cells.
+        height,width=region.shape
+        cells=[]
+        for ch in range(3):
+            planes=[]
+            for dy in range(2):
+                for dx in range(2):
+                    if cmap[dy,dx]==ch:
+                        planes.append(region[dy:height-height%2:2,dx:width-width%2:2])
+            cells.append(np.mean(planes,axis=0))
+        rgb=np.stack(cells,axis=-1).reshape(-1,3)
+        valid=(rgb.min(axis=1)>.03)&(rgb.max(axis=1)<.96)
+        if mode != "patch": valid &= rgb.max(axis=1)/np.maximum(rgb.min(axis=1),1e-9)<2.5
+        samples=rgb[valid]
+        if len(samples)<64 or len(samples)<len(rgb)*.05 or (mode!="patch" and np.ptp(samples[:,1])<.04):
+            logger.warning("AWB abstained: insufficient or monochrome samples; using configured fallback gains")
+            return clamp(np.asarray(cfg["wb_gains"],dtype=float))
+        ratios=np.log(samples[:,1:2]/samples[:,[0,2]])
+        med=np.median(ratios,axis=0)
+        spread=np.max(np.median(np.abs(ratios-med),axis=0))
+        if mode!="patch" and spread<.015 and np.max(np.abs(med))>.12:
+            logger.warning("AWB abstained: single chromaticity; ambiguous illuminant")
+            return clamp(np.asarray(cfg["wb_gains"],dtype=float))
+        confidence=len(samples)/len(rgb)*max(0,1-spread/.25)
+        result=np.array([np.exp(med[0]),1,np.exp(med[1])])
+        if confidence<.15 or np.any(result<lo) or np.any(result>hi):
+            logger.warning("AWB abstained: unreliable estimate; using configured gains")
+            return clamp(np.asarray(cfg["wb_gains"],dtype=float))
+        return result
     if mode == "manual":
         return np.clip(np.array(cfg["wb_gains"], dtype=np.float64), lo, hi)
     raise ValueError("未知 wb_mode: %s" % mode)
@@ -198,7 +240,7 @@ def apply_ccm(img_lin: np.ndarray, ccm) -> np.ndarray:
     ng = m[1, 0] * r + m[1, 1] * g + m[1, 2] * b
     nb = m[2, 0] * r + m[2, 1] * g + m[2, 2] * b
     out = np.stack([nb, ng, nr], axis=-1)
-    return np.clip(out, 0.0, 1.0)
+    return out
 
 
 def adjust_saturation(img: np.ndarray, s: float) -> np.ndarray:
@@ -210,6 +252,16 @@ def adjust_saturation(img: np.ndarray, s: float) -> np.ndarray:
 
 
 def run_isp(raw_u8: np.ndarray, cfg: dict, pattern: str) -> np.ndarray:
+    cfg = {**DEFAULT_CONFIG, **cfg}
+    numeric=[cfg[k] for k in ("black_level","gamma","wb_gain_min","wb_gain_max","brightness","saturation")]
+    if not np.all(np.isfinite(numeric)) or not 0<=cfg["black_level"]<255 or not 0<cfg["gamma"]<=10 or not 0<cfg["wb_gain_min"]<=1<=cfg["wb_gain_max"]<=16:
+        raise ValueError("Invalid ISP numeric parameters")
+    gains0=np.asarray(cfg["wb_gains"],dtype=float)
+    if gains0.shape!=(3,) or not np.all(np.isfinite(gains0)) or np.any(gains0<cfg["wb_gain_min"]) or np.any(gains0>cfg["wb_gain_max"]):
+        raise ValueError("Invalid manual gains")
+    if not np.all(np.isfinite(cfg["ccm"])): raise ValueError("Invalid CCM")
+    if raw_u8.dtype!=np.uint8 or raw_u8.ndim!=2 or min(raw_u8.shape)<4 or any(v%2 for v in raw_u8.shape):
+        raise ValueError("Expected even packed Bayer8 image >=4x4")
     h, w = raw_u8.shape
     raw01 = raw_u8.astype(np.float64) / 255.0
 
@@ -223,12 +275,13 @@ def run_isp(raw_u8: np.ndarray, cfg: dict, pattern: str) -> np.ndarray:
     logger.info("WB gains [R, G, B] = %s" % np.round(gains, 4).tolist())
     ch_map = bayer_channel_map(pattern, w, h)
     wb = gains[ch_map]
-    raw01 = np.clip(raw01 * wb, 0.0, 1.0)
+    raw01 = raw01 * wb
+    headroom=max(1.0,float(gains.max()))
 
     # 3) 去马赛克（16-bit 保精度）
-    raw16 = (raw01 * 65535.0 + 0.5).astype(np.uint16)
+    raw16 = (raw01 / headroom * 65535.0 + 0.5).astype(np.uint16)
     bgr16 = cv2.demosaicing(raw16, BAYER_CV_CODE[pattern])
-    lin = bgr16.astype(np.float64) / 65535.0
+    lin = bgr16.astype(np.float64) / 65535.0 * headroom
 
     # 4) CCM（线性域）
     lin = apply_ccm(lin, cfg["ccm"])
@@ -236,7 +289,7 @@ def run_isp(raw_u8: np.ndarray, cfg: dict, pattern: str) -> np.ndarray:
     # 5) gamma 编码 + 亮度
     gamma = float(cfg["gamma"])
     if gamma > 0 and abs(gamma - 1.0) > 1e-3:
-        lin = np.power(lin, 1.0 / gamma)
+        lin = np.power(np.maximum(lin,0), 1.0 / gamma)
     lin = lin * float(cfg["brightness"])
 
     # 6) 饱和度
@@ -259,17 +312,15 @@ def save_image(path: str, img: np.ndarray) -> None:
 # ---------------------------------------------------------------- 命令
 
 def cmd_extract(a):
-    ok = extract_y_plane_ffmpeg(a.avi, a.frame, a.width, a.height, a.out)
-    if ok:
-        logger.info("ffmpeg 提取成功: %s (%d 字节)" % (a.out, a.width * a.height))
-        return
-    logger.info("ffmpeg 不可用或失败，改用纯 Python AVI 解析…")
+    if not a.preserved_bayer:
+        raise ValueError("Require --preserved-bayer after checking recording summary gray8_frames == aps_frames; neutral UV alone is not proof")
     extract_y_plane_python(a.avi, a.frame, a.width, a.height, a.out)
+
 
 
 def cmd_process(a):
     cfg = dict(DEFAULT_CONFIG)
-    if a.config and os.path.exists(a.config):
+    if a.config:
         with open(a.config, "r", encoding="utf-8") as f:
             cfg.update(json.load(f))
     raw = np.fromfile(a.input, dtype=np.uint8)
@@ -311,7 +362,7 @@ def cmd_stats(a):
               % (name, v.min(), p[0], p[1], v.mean(), p[2], int(v.max()),
                  100.0 * (v >= 250).mean()))
     dark_med = float(np.median(raw[raw <= np.percentile(raw, 1)]))
-    logger.info("最暗 1%% 像素中位数 ≈ %.1f（若明显大于配置的 black_level，请修正 black_level）" % dark_med)
+    logger.info("最暗 1%% 像素中位数 ≈ %.1f（仅为场景统计，不能据此标定 black_level；请使用遮光黑帧）" % dark_med)
 
 
 def cmd_dump_config(a):
@@ -321,6 +372,7 @@ def cmd_dump_config(a):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logger.info(f'.....start....')
     logger.info(f'python {" ".join(sys.argv)}')
     p = argparse.ArgumentParser(description="APS 离线 ISP 调参工具")
@@ -332,6 +384,7 @@ def main():
     e.add_argument("--width", type=int, required=True)
     e.add_argument("--height", type=int, required=True)
     e.add_argument("--out", required=True)
+    e.add_argument("--preserved-bayer", action="store_true", help="Confirm input provenance from recording summary")
     e.set_defaults(func=cmd_extract)
 
     pr = sub.add_parser("process", help="对提取的 .raw 执行 ISP 链并输出 PNG")
@@ -339,7 +392,7 @@ def main():
     pr.add_argument("--width", type=int, required=True)
     pr.add_argument("--height", type=int, required=True)
     pr.add_argument("--bayer", default="gbrg", choices=list(BAYER_CV_CODE))
-    pr.add_argument("--config", default="isp_params.json")
+    pr.add_argument("--config", help="Optional JSON; missing named file is an error")
     pr.add_argument("--out", default="isp_out.png")
     pr.add_argument("--with-baseline", action="store_true", help="同时输出无 ISP 参照图")
     pr.set_defaults(func=cmd_process)

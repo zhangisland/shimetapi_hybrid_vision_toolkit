@@ -46,10 +46,8 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
         Shimeta::Frame f;
         Shimeta::EvsTimestamp ts;
         if (!reader_->readApsFrame(f, &ts)) return false;
-        uint8_t* base = const_cast<uint8_t*>(f.aps.data);
-        cv::Mat y(f.height, f.width, CV_8UC1, base);
-        cv::Mat uv(f.height / 2, f.width / 2, CV_8UC2, base + size_t(f.width) * f.height);
-        cv::cvtColorTwoPlane(y, uv, current_frame_, cv::COLOR_YUV2BGR_NV12);
+        try { current_frame_ = isp_.process(f); }
+        catch(const std::exception& e) { std::cerr << "APS decode: " << e.what() << std::endl; return false; }
         current_timestamp_ = ts;
         ++current_index_;
     }
@@ -668,13 +666,13 @@ cv::Mat composeSideBySide(const cv::Mat& evs_frame, const cv::Mat& video_frame,
 /** @brief 打印 OpenCV 窗口初始化失败诊断。 */
 void printGuiStartupError(const cv::Exception& e) {
     std::cerr << "Failed to initialize OpenCV window:\n" << e.what() << "\n"
-              << "DISPLAY=" << (std::getenv("DISPLAY") ?: "(unset)") << "\n"
+              << "DISPLAY=" << (std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "(unset)") << "\n"
               << "Run with DISPLAY or X11 forwarding.\n";
 }
 
 /** @brief 打印命令行用法。 */
 void printUsage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <events.raw> <video.avi> [fps] [speed]\n"
+    std::cerr << "Usage: " << prog << " <events.raw> <video.avi> [fps] [speed] [--aps-bayer PATTERN] [--aps-config JSON] [--aps-wb MODE]\n"
               << "       " << prog << " <events.raw> <video.avi> --dump-timestamps\n"
               << "  events.raw : EVS 录制文件（toolkit EventReader 格式）\n"
               << "  video.avi  : APS AVI 录制文件（含 tsmp chunk）\n"

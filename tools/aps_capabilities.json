@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "scope": "Bundled SDK; no hardware probe; do not infer sensor capabilities",
+  "exposure": {
+    "available": false,
+    "requested": null,
+    "actual": null,
+    "unit": null,
+    "range": null,
+    "step": null,
+    "reason": "Camera::SetExposure ignores value and only returns whether device pointer exists; verified bundled x5/s100/x86_64 ELF"
+  },
+  "aps_fps": {
+    "available": false,
+    "actual": null,
+    "reason": "SetFrameRate/GetFrameRate are EVS-only per API.md; 30 fps sensor profile/AVI header is not readback"
+  },
+  "native_raw8": {
+    "available": false,
+    "reason": "No pixel format selector. VIN bypass returns software-derived Bayer8 (RAW10 >> 2), not native APS RAW8"
+  },
+  "gain": {
+    "available": false,
+    "actual": null,
+    "reason": "No analog/digital gain API"
+  },
+  "hardware_ae_awb": {
+    "available": false,
+    "reason": "Internal X5 ISP 2A exists but is not publicly configurable/readable; bypass skips it"
+  },
+  "software_ae": {
+    "available": false,
+    "reason": "No effective exposure setter or frame exposure feedback"
+  },
+  "software_wb": {
+    "available": true,
+    "modes": [
+      "off",
+      "manual",
+      "once",
+      "continuous"
+    ],
+    "scope": "Explicit preserved Bayer input only; never applied to hardware NV12"
+  },
+  "metadata": {
+    "exposure": null,
+    "gain": null,
+    "adc_bits": null,
+    "stride": null,
+    "sensor_sequence": null,
+    "reason": "Public Frame has format, geometry and timestamp pairing, but no these fields; reject padded buffers"
+  },
+  "formats": {
+    "vin_transport": "RAW10 per shipped profile",
+    "application_bypass": "packed Gray8 derived from RAW10",
+    "isp": "float32 with scaled uint16 demosaic",
+    "raw_save": "unchanged derived Bayer8 samples; not original RAW10",
+    "display": "8-bit BGR gamma encoded; identity CCM, uncalibrated"
+  },
+  "audited_sha256": {
+    "x5": "6ae0ae6ba5335f8a2f09b546ab49ccade1e22474ddd5e161a9bdb5f78b147f4f",
+    "s100": "b2be3e047c4723c818f0d76564937a0a66d3a7542393443cb5b4e2f13faa9d91",
+    "x86_64": "b90a7480d8e1398db95c821ecf324614abb5483f120a476bfa410dd141d1d3bc"
+  }
+}

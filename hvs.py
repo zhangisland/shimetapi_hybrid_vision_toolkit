@@ -33,7 +33,8 @@ def executable(build, name, subdir):
 def check_record_sources(root):
     required = ['CMakeLists.txt', 'samples/CMakeLists.txt',
                 'samples/cpp/hvs_record/CMakeLists.txt', 'samples/cpp/hvs_record/main.cpp',
-                'samples/cpp/hvs_record/dual_stream_writer.h']
+                'samples/cpp/hvs_record/dual_stream_writer.h',
+                'samples/cpp/hvs_record/recording_storage.h']
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise RuntimeError('Incomplete HVS source deployment: missing ' + ', '.join(missing) +
@@ -101,6 +102,8 @@ def main(argv=None):
     r.add_argument('--aps-height', '--height', dest='height', type=int, default=1224)
     r.add_argument('--evs-width', type=int, default=768)
     r.add_argument('--evs-height', type=int, default=608)
+    r.add_argument('--storage', choices=['memory', 'disk'], default='memory')
+    r.add_argument('--ram-dir', type=Path, default=Path('/dev/shm'))
     r.add_argument('--max-mib', type=number, default=1024)
     s = sub.add_parser('stop', help='Request graceful stop from another terminal')
     s.add_argument('--output', type=Path, required=True)
@@ -117,16 +120,29 @@ def main(argv=None):
         c.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
         c.add_argument('--input', type=Path, required=True, help='events.raw produced by hvs_record')
         c.add_argument('--output', type=Path, required=True, help='New output file; must not exist')
+    p.add_argument('--aps-config', type=Path, help='Software ISP JSON; used only for explicit Bayer playback')
+    p.add_argument('--aps-wb', choices=['off','manual','once','continuous'])
+    sub.add_parser('aps-capabilities', help='Report verified bundled SDK capabilities; no hardware probe')
+    for key in ('exposure-us','fps','format','gain','ae','hardware-wb'):
+        r.add_argument('--aps-'+key, help='Unavailable in bundled SDK; explicit error before capture')
     d = sub.add_parser('diagnose', help='Read-only platform/library checks')
     d.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     args = parser.parse_args(argv)
+    if args.command == 'aps-capabilities':
+        print((ROOT / 'tools/aps_capabilities.json').read_text(encoding='utf-8'))
+        return 0
+    if args.command == 'record':
+        for key in ('exposure_us','fps','format','gain','ae','hardware_wb'):
+            if getattr(args, 'aps_'+key) is not None:
+                raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
     if args.command == 'stop':
         folder = args.output.resolve()
         summary = read_summary(folder)
         if summary:
             print(summary)
             return 0 if summary.get('status') == 'complete' else 2
-        if not folder.is_dir() or not (folder / 'events.raw').is_file():
+        if not folder.is_dir() or not ((folder / 'events.raw').is_file() or
+                                       (folder / 'recording.storage').is_file()):
             raise RuntimeError('No recording session at this path')
         (folder / 'stop.request').touch(exist_ok=True)
         end = time.monotonic() + args.wait
@@ -200,7 +216,9 @@ def main(argv=None):
         command = [str(binary), '--output', str(folder), '--seconds', str(args.seconds),
                    '--timeout', str(args.timeout), '--aps-width', str(args.width), '--aps-height', str(args.height),
                    '--evs-width', str(args.evs_width), '--evs-height', str(args.evs_height),
-                   '--max-mib', str(args.max_mib)]
+                   '--max-mib', str(args.max_mib), '--storage', args.storage]
+        if args.storage == 'memory':
+            command += ['--ram-dir', str(args.ram_dir)]
         # Replace this process: Ctrl+C/SIGTERM reaches the C++ signal handler directly.
         os.execve(str(binary), command, runtime_env(vin_bypass=args.x5_vin_bypass))
     if args.command == 'play':
@@ -223,6 +241,10 @@ def main(argv=None):
         command = [player, folder / 'events.raw', folder / 'aps.avi', '30', str(args.speed)]
         if args.aps_bayer != 'none':
             command.extend(['--aps-bayer', args.aps_bayer])
+        if args.aps_config:
+            command.extend(['--aps-config', args.aps_config])
+        if args.aps_wb:
+            command.extend(['--aps-wb', args.aps_wb])
         if args.dump_timestamps:
             command.append('--dump-timestamps')
         run(command, env=runtime_env())

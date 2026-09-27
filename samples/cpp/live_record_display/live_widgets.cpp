@@ -74,11 +74,6 @@ bool RecordManager::start(const std::string& evsPrefix, const std::string& apsPr
     if (recording_) return true;
     evsPath_ = makeTimestampedPath(evsPrefix, "raw");
     apsPath_ = makeTimestampedPath(apsPrefix, "avi");
-    if (!writer_.open(evsPath_, apsPath_, kDefaultEvsWidth, kDefaultApsHeight,
-                      Shimeta::io::RawFormat::Evt3, kDefaultApsFps)) {
-        std::fprintf(stderr, "RecordManager: open failed\n");
-        return false;
-    }
     seenAps_ = false;
     recording_ = true;
     std::printf("\n开始录制: %s / %s\n", evsPath_.c_str(), apsPath_.c_str());
@@ -96,14 +91,33 @@ void RecordManager::stop() {
 void RecordManager::writeFrame(const Shimeta::Frame& f, const Shimeta::EvsTimestamp* evs_ts) {
     if (!recording_) return;
 
-    const bool has_aps = f.aps.data != nullptr && f.aps.size > 0 &&
-                         f.format == Shimeta::PixelFormat::NV12;
-    if (!seenAps_) {
-        if (!has_aps) return; // 丢弃本次录制开始前、尚未等到 APS 的 EVS 包。
-        seenAps_ = true;
+    auto frame=f;
+    const bool has_aps=f.aps.data && f.aps.size;
+    if(!seenAps_) {
+        if(!has_aps) return; // Recording starts at first APS, explicitly announced below.
+        if(f.width<4 || f.height<4 || f.width%2 || f.height%2) { recording_=false; throw std::runtime_error("Invalid APS recording geometry"); }
+        width_=f.width; height_=f.height; format_=f.format;
+        if(!writer_.open(evsPath_,apsPath_,kDefaultEvsWidth,kDefaultEvsHeight,width_,height_)) {
+            recording_=false; throw std::runtime_error("Cannot open recording");
+        }
+        seenAps_=true;
+        std::printf("Recording begins at first APS: %dx%d; AVI rate is nominal, not device FPS\n",width_,height_);
     }
+    std::vector<uint8_t> packed;
+    if(has_aps) {
+        if(f.width!=width_ || f.height!=height_ || f.format!=format_) {
+            stop(); throw std::runtime_error("Recording stopped: APS format/geometry changed; start a new recording");
+        }
+        const size_t n=size_t(width_)*height_;
+        if(f.format==Shimeta::PixelFormat::Gray8 && f.aps.size==n) {
+            packed.assign(n*3/2,128); std::copy_n(f.aps.data,n,packed.data());
+            frame.aps={packed.data(),packed.size()}; frame.format=Shimeta::PixelFormat::NV12;
+        } else if(f.format!=Shimeta::PixelFormat::NV12 || f.aps.size!=n*3/2) {
+            stop(); throw std::runtime_error("Recording requires exact packed Gray8 or NV12");
+        }
+    }
+    if(!writer_.writeFrame(frame,evs_ts)) { stop(); throw std::runtime_error("Recording write failed"); }
 
-    writer_.writeFrame(f, evs_ts);
 }
 
 // ============================================================================
@@ -129,6 +143,11 @@ void printUsage(const char* prog) {
         "  --no-display         禁用 OpenCV 窗口，使用控制台交互\n"
         "  --evs-prefix <str>   EVS 录制文件前缀 (default: live_events)\n"
         "  --aps-prefix <str>   APS 录制文件前缀 (default: live_video)\n"
+        "  --aps-bayer <none|rggb|bggr|grbg|gbrg|compare>  Explicit input interpretation\n"
+        "  --aps-config <json>  Software ISP configuration\n"
+        "  --aps-wb <off|manual|once|continuous>  Software WB only\n"
+        "  --aps-capabilities  Print SDK limitations\n"
+        "  w/c/m/o  Once/continuous/manual(hold gains)/off WB; s export diagnostics\n"
         "  -h, --help           显示帮助\n"
         "\nKeys:\n"
         "  r       开始/停止录制（带时间戳文件名）\n"
