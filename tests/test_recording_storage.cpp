@@ -13,6 +13,7 @@ int main() {
         storage.memory=true; storage.data=ram;
         std::ofstream(ram/"events.raw") << "events";
         std::ofstream(ram/"aps.avi") << "images";
+        std::ofstream(ram/"aps.frames.jsonl") << "metadata";
         std::ofstream(out/"recording.storage") << ram.string();
         if (fail) std::ofstream(out/"aps.avi.partial") << "keep";
         if (fail) {
@@ -23,6 +24,7 @@ int main() {
             storage.publish(); require(fs::file_size(out/"events.raw")==6);
             require(fs::file_size(out/"aps.avi")==6 && !fs::exists(ram));
             require(!fs::exists(out/"recording.storage"));
+            require(fs::file_size(out/"aps.frames.jsonl")==8);
         }
     }
     // Only remove this test's uniquely created directory.

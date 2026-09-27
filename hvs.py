@@ -34,7 +34,8 @@ def check_record_sources(root):
     required = ['CMakeLists.txt', 'samples/CMakeLists.txt',
                 'samples/cpp/hvs_record/CMakeLists.txt', 'samples/cpp/hvs_record/main.cpp',
                 'samples/cpp/hvs_record/dual_stream_writer.h',
-                'samples/cpp/hvs_record/recording_storage.h']
+                'samples/cpp/hvs_record/recording_storage.h',
+                'samples/cpp/hvs_record/aps_metadata.h']
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise RuntimeError('Incomplete HVS source deployment: missing ' + ', '.join(missing) +
@@ -98,6 +99,8 @@ def main(argv=None):
                    help='Experimental: bypass ISP using an exact-version guarded library copy')
     r.add_argument('--seconds', type=number, default=0)
     r.add_argument('--timeout', type=number, default=10)
+    r.add_argument('--aps-stall-timeout', type=number, default=2,
+                   help='Maximum gap after the first APS frame, in seconds')
     r.add_argument('--aps-width', '--width', dest='width', type=int, default=1632)
     r.add_argument('--aps-height', '--height', dest='height', type=int, default=1224)
     r.add_argument('--evs-width', type=int, default=768)
@@ -111,8 +114,8 @@ def main(argv=None):
     p = sub.add_parser('play', help='Replay APS+EVS using the existing SDK player')
     p.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--aps-bayer', choices=['none', 'rggb', 'bggr', 'grbg', 'gbrg', 'compare'], default='none',
-                   help='Demosaic preserved Bayer8 samples; compare shows all four CFA patterns')
+    p.add_argument('--aps-bayer', choices=['auto', 'none', 'rggb', 'bggr', 'grbg', 'gbrg', 'compare'], default='auto',
+                   help='auto: preserved Gray8 uses the existing gbrg preset; native NV12 uses none')
     p.add_argument('--speed', type=number, default=1)
     p.add_argument('--dump-timestamps', action='store_true', help='Inspect without a GUI')
     for kind in ('csv', 'npz'):
@@ -203,7 +206,7 @@ def main(argv=None):
         return 0
     folder = args.output.resolve()
     if args.command == 'record':
-        if args.timeout <= 0 or not 1 <= args.max_mib <= 2048:
+        if args.timeout <= 0 or args.aps_stall_timeout <= 0 or not 1 <= args.max_mib <= 2048:
             parser.error('--timeout must be positive; --max-mib must be in [1,2048]')
         if any(n < 2 or n > 8192 or n % 2 for n in (args.width, args.height, args.evs_width, args.evs_height)):
             parser.error('Dimensions must be even integers in [2,8192]')
@@ -214,7 +217,7 @@ def main(argv=None):
             raise RuntimeError('Insufficient free space for --max-mib plus 64 MiB margin')
         binary = executable(build, 'hv_hvs_record', 'hvs_record')
         command = [str(binary), '--output', str(folder), '--seconds', str(args.seconds),
-                   '--timeout', str(args.timeout), '--aps-width', str(args.width), '--aps-height', str(args.height),
+                   '--timeout', str(args.timeout), '--aps-stall-timeout', str(args.aps_stall_timeout), '--aps-width', str(args.width), '--aps-height', str(args.height),
                    '--evs-width', str(args.evs_width), '--evs-height', str(args.evs_height),
                    '--max-mib', str(args.max_mib), '--storage', args.storage]
         if args.storage == 'memory':
@@ -232,10 +235,19 @@ def main(argv=None):
                 raise RuntimeError(f'Missing or empty {name}')
         if not args.dump_timestamps and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
             raise RuntimeError('No graphical display. Use the X5 desktop/X forwarding, or --dump-timestamps.')
+        if args.aps_bayer == 'auto':
+            aps_count = int(summary.get('aps_frames', '0'))
+            preserved_gray = aps_count > 0 and int(summary.get('gray8_frames', '0')) == aps_count
+            # Restore this project's existing gbrg replay preset only when all
+            # APS Y planes were preserved Gray8. This is not CFA detection.
+            args.aps_bayer = 'gbrg' if preserved_gray else 'none'
+            print('APS replay auto: ' + ('preserved Gray8 -> existing gbrg color reconstruction'
+                                         if preserved_gray else 'NV12/unknown provenance -> native display'), flush=True)
         if args.aps_bayer != 'none':
             aps_count = int(summary.get('aps_frames', '0'))
             if aps_count <= 0 or int(summary.get('gray8_frames', '0')) != aps_count:
-                raise RuntimeError('Bayer replay requires a recording made entirely from preserved Gray8 APS frames')
+                raise RuntimeError('Bayer replay requires preserved Gray8 APS frames; this session contains NV12 or mixed frames. '
+                                   'Replay with --aps-bayer none (scripts/play.sh no longer forces gbrg).')
             print('Bayer reconstruction uses original Y samples; CFA pattern and color calibration must be verified.', flush=True)
         player = executable(build, 'hv_sample_player', 'player')
         command = [player, folder / 'events.raw', folder / 'aps.avi', '30', str(args.speed)]

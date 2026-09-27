@@ -70,7 +70,7 @@ public:
     void publish() {
         namespace fs = std::filesystem;
         if (!memory) return;
-        for (const auto* name : {"events.raw", "aps.avi"}) {
+        for (const auto* name : {"events.raw", "aps.avi", "aps.frames.jsonl"}) {
             auto source = data / name;
             auto temporary = output / (std::string(name) + ".partial");
             if (!fs::copy_file(source, temporary, fs::copy_options::none) ||
@@ -78,13 +78,14 @@ public:
                 throw std::runtime_error("RAM copy verification failed");
             syncFile(temporary);
         }
-        for (const auto* name : {"events.raw", "aps.avi"}) {
+        for (const auto* name : {"events.raw", "aps.avi", "aps.frames.jsonl"}) {
             if (fs::exists(output / name)) throw std::runtime_error("Destination file exists");
             fs::rename(output / (std::string(name) + ".partial"), output / name);
         }
         syncFile(output);
         fs::remove(data / "events.raw");
         fs::remove(data / "aps.avi");
+        fs::remove(data / "aps.frames.jsonl");
         fs::remove(data);
         fs::remove(output / "recording.storage");
     }

@@ -1,6 +1,7 @@
 #include <shimetapi/hv/camera.h>
 #include "dual_stream_writer.h"
 #include "recording_storage.h"
+#include "aps_metadata.h"
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -23,7 +24,7 @@ struct Options {
     fs::path output;
     fs::path ramRoot = "/dev/shm";
     bool memory = true;
-    double seconds = 0, timeout = 10;
+    double seconds = 0, timeout = 10, apsStallTimeout = 2;
     int width = 1632, height = 1224;
     int evsWidth = 768, evsHeight = 608;
     uint64_t maxBytes = 1024ULL * 1024 * 1024;
@@ -33,7 +34,7 @@ static Options parse(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string key = argv[i];
         if (key == "--help") {
-            std::cout << "hv_hvs_record --output NEW_DIRECTORY [--seconds 0] [--timeout 10] "
+            std::cout << "hv_hvs_record --output NEW_DIRECTORY [--seconds 0] [--timeout 10] [--aps-stall-timeout 2] "
                          "[--aps-width 1632 --aps-height 1224] [--evs-width 768 --evs-height 608] [--max-mib 1024] [--storage memory|disk] [--ram-dir /dev/shm]\n"
                          "Stop: SIGINT, SIGTERM, or create NEW_DIRECTORY/stop.request\n";
             std::exit(0);
@@ -53,6 +54,7 @@ static Options parse(int argc, char** argv) {
         if (used != value.size() || !std::isfinite(n)) throw std::runtime_error("Invalid number: " + value);
         if (key == "--seconds") o.seconds = n;
         else if (key == "--timeout") o.timeout = n;
+        else if (key == "--aps-stall-timeout") o.apsStallTimeout = n;
         else if (key == "--width" || key == "--height" || key == "--aps-width" ||
                  key == "--aps-height" || key == "--evs-width" || key == "--evs-height") {
             if (n < 2 || n > 8192 || n != std::floor(n) || int(n) % 2)
@@ -66,7 +68,7 @@ static Options parse(int argc, char** argv) {
             o.maxBytes = uint64_t(n * 1024 * 1024);
         } else throw std::runtime_error("Unknown option: " + key);
     }
-    if (o.output.empty() || o.seconds < 0 || o.timeout <= 0)
+    if (o.output.empty() || o.seconds < 0 || o.timeout <= 0 || o.apsStallTimeout <= 0)
         throw std::runtime_error("Require --output, seconds >= 0, timeout > 0");
     if (!o.memory) o.ramRoot.clear();
     else if (o.ramRoot.empty()) throw std::runtime_error("RAM directory cannot be empty");
@@ -75,6 +77,7 @@ static Options parse(int argc, char** argv) {
 struct Recorder {
     const Options& opt;
     DualStreamWriter writer;
+    std::ofstream metadata;
     std::mutex mutex;
     bool active = false, limit = false;
     std::string error;
@@ -128,6 +131,7 @@ struct Recorder {
                 const auto count = writer.apsFrameCount();
                 if (count != aps + 1) throw std::runtime_error("Writer did not append exactly one APS frame");
                 aps = count; lastAps = now;
+                writeApsMetadata(metadata, aps - 1, source);
                 if (ts) ++paired;
                 lastApsOwner = source.aps_owner; lastApsPtr = source.aps.data;
             }
@@ -150,6 +154,9 @@ static int run(const Options& o) {
                            o.evsWidth, o.evsHeight, o.width, o.height)) throw std::runtime_error("Cannot open recording files");
         std::cout << "EVS geometry=" << o.evsWidth << "x" << o.evsHeight
                   << ", APS geometry=" << o.width << "x" << o.height << std::endl;
+        r.metadata.open(storage.data / "aps.frames.jsonl");
+        if (!r.metadata) throw std::runtime_error("Cannot open APS metadata");
+        std::cout << "APS exposure unavailable in bundled Frame API; recording null with provenance.\n";
         Shimeta::hv::DeviceConfig config;
         config.backend = Shimeta::hv::Backend::MipiHvs;
         if (!camera.Init(config)) throw std::runtime_error("Camera.Init failed");
@@ -172,6 +179,10 @@ static int run(const Options& o) {
                                    RecordingStorage::availableMemory() < 64ULL * 1024 * 1024)) {
                 reason = "ram_space_limit"; break;
             }
+            if (apsStalled(r.aps, std::chrono::duration<double>(now - r.lastAps).count(), o.apsStallTimeout)) {
+                r.error = "APS stalled after first frame; partial data retained; inspect ISP pipeline";
+                break;
+            }
             if (std::chrono::duration<double>(now - r.lastEvs).count() > o.timeout ||
                 std::chrono::duration<double>(now - r.lastAps).count() > o.timeout) {
                 r.error = "APS or EVS absent/stalled; inspect MIPI/ISP logs and X5 runtime libraries";
@@ -193,6 +204,13 @@ static int run(const Options& o) {
     if (startAttempted) camera.StopStream();
     if (initialized) camera.Destroy();
     r.writer.close();
+    if (r.metadata.is_open()) {
+        r.metadata.close();
+        if (!r.metadata) r.error += "; APS metadata close failed";
+    }
+    if (r.error.empty() && apsStalled(r.aps,
+            std::chrono::duration<double>(Clock::now() - r.lastAps).count(), o.apsStallTimeout))
+        r.error = "APS stalled at capture end; partial data retained";
     if (r.error.empty() && (!r.packets || !r.aps)) r.error = "Incomplete HVS recording: one or both streams have zero frames";
     if (r.error.empty() && (fs::file_size(storage.data / "events.raw") <= r.evsBytes ||
         fs::file_size(storage.data / "aps.avi") < r.aps * uint64_t(o.width) * o.height * 3 / 2))
@@ -213,6 +231,10 @@ static int run(const Options& o) {
             << "\nevs_width=" << o.evsWidth << "\nevs_height=" << o.evsHeight
             << "\naps_width=" << o.width << "\naps_height=" << o.height
             << "\naps_storage_format=NV12"
+            << "\naps_metadata_file=aps.frames.jsonl"
+            << "\naps_exposure_status=unavailable"
+            << "\naps_exposure_source=sdk_frame_has_no_exposure"
+            << "\naps_stall_timeout_seconds=" << o.apsStallTimeout
             << "\npayload_bytes=" << r.payload << '\n';
     summary.close();
     if (!summary) throw std::runtime_error("Failed to write summary.txt");

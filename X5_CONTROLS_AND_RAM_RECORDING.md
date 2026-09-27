@@ -57,3 +57,47 @@ Windows 主机：录制源码编译检查、控制 API 契约测试（替身类�
 建议同一场景分别录制 memory/disk，比较实际 APS/EVS 接收计数、总时长和 CPU/内存使用；控制测试以图像亮度、时间戳间隔及 native frame_id 为证据。
 
 主机验证结果：C++ 6/6、Python 22/22 通过；录制主程序编译检查通过。Python 使用已有 pyqt_env（默认 Python 缺少 cv2）。未进行板端测试。
+
+## APS 曝光属性与停滞检测补充
+
+每个写入 AVI 的 APS 帧同时写一行 `aps.frames.jsonl`，`aps_frame_index` 从 0 开始，与 AVI 图像帧顺序对应。字段含宽高、source_format、storage_format、exposure_time_us、exposure_status、exposure_source、paired_evs_timestamp_us。此文件随 RAW/AVI 一起在 tmpfs 暂存并落盘；缺失或写入失败不能报告完整成功。
+
+当前预编译 Frame 没有逐帧曝光字段，默认 exposure_time_us=null、exposure_status=unavailable、exposure_source=sdk_frame_has_no_exposure。不根据自动曝光提示、请求值、帧率或 EVS 时间戳推算曝光。新增独立 ApsExposure 适配结构，可供未来原生后端传入确实与该帧关联的曝光；没有在预编译库构造的 Frame 末尾追加字段，以避免 ABI 越界。
+
+本次日志显示 ISP 输出 NV12，属于处理后的图像，不是 RGB RAW。Gray8 旁路同样没有完整 RAW10 精度，source_format 会据实记录。日志的 -35 表示曝光读取失败，这里不猜测其具体硬件原因；“keeping auto 2A”不能证明 AE 正常工作。
+
+默认 --timeout 10 继续负责初始等帧；新增 --aps-stall-timeout 2 负责首个 APS 之后的最大无帧间隔。超过阈值会退出并保存 partial 数据，summary.status=failed。低帧率场景可明确增大阈值。不是 sensor 丢帧率检测，也不代表修复了 ISP 只出一帧的根因。
+
+重新构建并换新目录：
+
+```sh
+python3 hvs.py build
+python3 hvs.py record --output /app/recordings/ram02 --seconds 4 --max-mib 512
+cat /app/recordings/ram02/summary.txt
+head -n 2 /app/recordings/ram02/aps.frames.jsonl
+```
+
+旧 ram01 无法追溯恢复真实曝光时长。真正填充逐帧数值仍需原生采集后端/厂商提供带帧关联的曝光元数据；仅轮询 ISP 当前属性不足以精确对应缓存中的帧。
+
+## 修正录制/回放入口（针对当前已验证的旁路环境）
+
+先前给出的直接录制示例缺少 --x5-vin-bypass，导致当前板端回到 ISP 路径。该路径在用户日志中只收到一个 NV12 帧，随后 getframe 失败。新增停滞检测只是更早报告，不是对底层 ISP 的修复。当前请沿用 scripts/record.sh，其保留原有旁路参数，现在支持透传 --max-mib 等 CLI 选项，默认内存上限改为 512 MiB。
+
+scripts/play.sh 原来固定 --aps-bayer gbrg，会拒绝 NV12 会话。现已移除强制 Bayer，默认按 NV12 播放；旁路 Gray8 需要显式添加已确认的 Bayer 排列。
+
+```sh
+# 已有 ram01 是 NV12，可直接回放：
+bash scripts/play.sh --output /app/recordings/ram01
+# 新录制沿用旁路，使用新目录：
+bash scripts/record.sh --output /app/recordings/ram03 --seconds 4 --max-mib 512
+# 仅对全部来自 Gray8 的会话显式进行 Bayer 重建：
+bash scripts/play.sh --output /app/recordings/ram03 --aps-bayer gbrg
+```
+
+两个脚本通过自身位置定位 hvs.py，不再依赖当前工作目录。ram02 保留为 failed，不通过删除 summary 或强制 Bayer 掩盖采集问题。这里仍不宣称已恢复真实曝光元数据或修复 ISP 驱动。
+
+## 修复默认灰度回放回归
+
+此前将默认 Bayer 设置为 none 会跳过已存在的彩色重建。现在 hvs.py play 默认为 --aps-bayer auto，scripts/play.sh 沿用它：summary 中 aps_frames>0 且 gray8_frames==aps_frames 时，采用项目原有 gbrg 预设，调用 samples/cpp/player 的原有去马赛克/ISP 路径；NV12 或来源不明时不执行 Bayer 重建。auto 是格式路由，不是从图像识别 CFA。显式 --aps-bayer none/其他排列仍优先。
+
+这取代上文“默认按 NV12 播放”的说明。仅更新 hvs.py 和 scripts/play.sh 即可使用新默认值；C++ 彩色算法未改动。
