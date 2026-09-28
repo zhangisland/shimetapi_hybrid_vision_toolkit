@@ -3,7 +3,8 @@
 ## HVS相关的源代码编译
 ```bash
 cd /app/shimetapi_hybrid_vision_toolkit
-python3 hvs.py build --with-player
+# python3 hvs.py build --with-player
+python3 hvs.py build --with-native-live --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot --sdk-include-dir /usr/include
 ```
 
 ## 数据采集流程
