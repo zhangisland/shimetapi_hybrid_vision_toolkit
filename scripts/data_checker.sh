@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Default params
+
+#!/bin/bash
 SESSION=""
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --session) SESSION="$2"; shift 2;;
-    *) echo "Unknown option $1"; exit 1;;
-  esac
+    case "$1" in
+        --output)
+            SESSION="$2"; shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 --output SESSION"
+            echo "  --output SESSION   session directory to check (required)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 --output SESSION" >&2
+            exit 1
+            ;;
+    esac
 done
 
 if [[ -z "$SESSION" ]]; then
-  echo "ERROR: must supply --session SESSION_PATH"
-  exit 1
+    echo "ERROR: --output SESSION is required" >&2
+    echo "Usage: $0 --output SESSION" >&2
+    exit 1
 fi
 
 python3 tools/check_native_recording.py "$SESSION" && \

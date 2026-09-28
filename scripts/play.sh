@@ -1,22 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Default params
-aps_bayer=none
-SESSION=""
+#!/bin/bash
+APS_BAYER=none
+OUTPUT=""
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --aps-bayer) aps_bayer="$2"; shift 2;;
-    --session) SESSION="$2"; shift 2;;
-    *) echo "Unknown option $1"; exit 1;;
-  esac
+    case "$1" in
+        --aps-bayer)
+            APS_BAYER="$2"; shift 2
+            ;;
+        --output)
+            OUTPUT="$2"; shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--aps-bayer MODE] --output SESSION"
+            echo "  --aps-bayer MODE   bayer pattern (default: none)"
+            echo "  --output SESSION   session directory to play back (required)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--aps-bayer MODE] --output SESSION" >&2
+            exit 1
+            ;;
+    esac
 done
 
-if [[ -z "$SESSION" ]]; then
-  echo "ERROR: must supply --session SESSION_PATH"
-  exit 1
+if [[ -z "$OUTPUT" ]]; then
+    echo "ERROR: --output SESSION is required" >&2
+    echo "Usage: $0 [--aps-bayer MODE] --output SESSION" >&2
+    exit 1
 fi
 
-python3 hvs.py play --aps-bayer "$aps_bayer" "$SESSION"
-
+python3 hvs.py play --aps-bayer "$APS_BAYER" --output "$OUTPUT"
