@@ -48,6 +48,14 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
         if (!reader_->readApsFrame(f, &ts)) return false;
         try { current_frame_ = isp_.process(f); }
         catch(const std::exception& e) { std::cerr << "APS decode: " << e.what() << std::endl; return false; }
+        if(current_index_<8) {
+            const auto mean=cv::mean(current_frame_);
+            std::cout << "APS replay frame=" << current_index_
+                      << " bayer=" << isp_.pattern
+                      << " ISP-output-residual-WB=" << (isp_.ispOutputCorrection?"on":"off")
+                      << " output_mean_BGR=" << mean[0] << ',' << mean[1] << ',' << mean[2]
+                      << " | " << isp_.status() << std::endl;
+        }
         current_timestamp_ = ts;
         ++current_index_;
     }

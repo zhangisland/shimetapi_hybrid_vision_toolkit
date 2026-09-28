@@ -19,7 +19,7 @@ volatile std::sig_atomic_t interrupted=0;
 void signalStop(int) {interrupted=1;}
 struct Options {
     double exposure=5100,again=1,dgain=1,toleranceMs=25,waitMs=40,seconds=0;
-    int profile=1; bool noDisplay=false,record=false,correction=true;
+    int profile=1,previewWidth=1152; bool noDisplay=false,record=false,correction=true;
     std::string output="live_native";
 };
 double number(const char* value) {
@@ -74,7 +74,7 @@ int runNativeLive(int argc,char** argv) {
                 <<"Exposure/gains are initialization-only; API/readback are not frame measurements.\n"
                 <<"--sync-tolerance-ms 25 --sync-wait-ms 40 --aps-correction on|off --aps-wb off|manual|once|continuous\n"
                 <<"--aps-config JSON (existing WB fields; RAW black/gamma not reapplied to ISP output)\n"
-                <<"--no-display --seconds 10 --record --output NEW_SESSION_PREFIX\n"
+                <<"--no-display --seconds 10 --record --output NEW_SESSION_PREFIX --preview-width 1152\n"
                 <<"Keys: q/ESC quit, r record, k correction on/off, w/c/m/o WB modes\n"
                 <<"Recording: uncorrected ISP NV12 AVI + EVS raw; host average-rate timeline + per-frame CSV.\n";
             return 0;
@@ -99,6 +99,7 @@ int runNativeLive(int argc,char** argv) {
         else if(k=="--sync-tolerance-ms") o.toleranceMs=number(v.c_str());
         else if(k=="--sync-wait-ms") o.waitMs=number(v.c_str());
         else if(k=="--seconds") o.seconds=number(v.c_str());
+        else if(k=="--preview-width") {double n=number(v.c_str());if(n<320||n>1920||n!=std::floor(n)) throw std::invalid_argument("preview-width integer 320..1920");o.previewWidth=int(n);}
         else if(k=="--profile") {double n=number(v.c_str());if(n<0||n>5||n!=std::floor(n)) throw std::invalid_argument("profile 0..5");o.profile=int(n);}
         else throw std::invalid_argument("Unknown native option: "+k);
     }
@@ -107,6 +108,9 @@ int runNativeLive(int argc,char** argv) {
     std::cout<<"HOST approximate pairing, not hardware sync. EVS packet receive times; ISP latency and packet duration unknown.\n"
              <<"ISP: demosaic/CCM/gamma, neutral manual AWB. Application: existing residual WB only.\n"
              <<"Exposure REQUEST us="<<o.exposure<<" again="<<o.again<<" dgain="<<o.dgain<<" (initialization only)\n";
+    const cv::Size previewSize(o.previewWidth,int(std::lround(o.previewWidth*608.0/1536.0)));
+    std::cout<<"preview_layout=whole_pair_v2 canvas="<<previewSize.width<<'x'<<previewSize.height
+             <<" window=AUTOSIZE (independent of exposure/gain)\n";
     x5_capture* backend=nullptr;
     int ret=x5_open(&backend,o.profile,o.exposure,o.again,o.dgain);
     if(ret || !backend) throw std::runtime_error("Native pipeline initialization failed: "+std::to_string(ret));
@@ -144,15 +148,25 @@ int runNativeLive(int argc,char** argv) {
     struct Join {std::atomic<bool>& stop;std::thread &e,&a;~Join(){stop=true;if(e.joinable())e.join();if(a.joinable())a.join();}} join{stop,evs,aps};
     evs=std::thread(capture,0); aps=std::thread(capture,1);
     interrupted=0; std::signal(SIGINT,signalStop);std::signal(SIGTERM,signalStop);
-    if(!o.noDisplay) cv::namedWindow(kWindowName,cv::WINDOW_NORMAL);
+    if(!o.noDisplay) cv::namedWindow(kWindowName,cv::WINDOW_AUTOSIZE);
     struct WindowGuard {bool active;~WindowGuard(){if(active)cv::destroyAllWindows();}} windowGuard{!o.noDisplay};
     Shimeta::codec::MipiRaw8Decoder decoder;
     const auto begin=hostNs(); auto report=begin; int64_t displayedNs=0, correctionNs=0, displayNs=0,decodeNs=0;
     int64_t lastUi=0;
     uint64_t displayed=0,processed=0,previous[2]={0,0},previousLogical=0;
+    double yMean=0,yClipped=0;
     cv::Mat lastCombined; std::string pairStatus="Waiting APS / EVS";
     while(!stop && !interrupted && !(o.seconds>0 && (hostNs()-begin)/1e9>=o.seconds)) {
         if(auto pair=sync.poll(hostNs())) {
+            // Sample central ISP Y before software color correction, never call
+            // this sensor RAW or a measured exposure. Fixed ROI aids A/B checks.
+            const auto& source=pair->aps.value;
+            uint64_t sum=0,count=0,clipped=0;
+            for(int y=source.height/4;y<source.height*3/4;y+=16)
+                for(int x=source.width/4;x<source.width*3/4;x+=16) {
+                    auto v=source.aps.data[size_t(y)*source.width+x];sum+=v;++count;if(v>=250)++clipped;
+                }
+            if(count) {yMean=double(sum)/count;yClipped=100.0*clipped/count;}
             auto t=hostNs(); color.ispOutputCorrection=o.correction;
             auto apsImage=color.process(pair->aps.value); correctionNs+=hostNs()-t; ++processed;
             cv::Mat evsImage=cv::Mat::zeros(kDefaultEvsHeight,kDefaultEvsWidth,CV_8UC3);
@@ -178,7 +192,14 @@ int runNativeLive(int argc,char** argv) {
                 const std::string label=stale?"STALE APS (>500ms), not synchronized":pairStatus;
                 cv::putText(canvas,label,{10,24},cv::FONT_HERSHEY_SIMPLEX,.6,stale?cv::Scalar(0,0,255):cv::Scalar(0,255,255),1);
                 cv::putText(canvas,std::string("Correction ")+(o.correction?"ON":"OFF")+" | "+recorder.status(),{10,50},cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(0,255,255),1);
-                cv::imshow(kWindowName,canvas); ++displayed;
+                cv::putText(canvas,"EVS (packet accumulation)",{10,canvas.rows-16},cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(255,255,255),1);
+                cv::putText(canvas,"APS (ISP NV12)",{kDefaultEvsWidth+10,canvas.rows-16},cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(255,255,255),1);
+                // Some GTK/X11 backends clip a WINDOW_NORMAL canvas to its small
+                // initial viewport. Resize the WHOLE pair explicitly so both
+                // panels are present even without backend-managed scaling.
+                cv::Mat fitted;
+                cv::resize(canvas,fitted,previewSize,0,0,cv::INTER_AREA);
+                cv::imshow(kWindowName,fitted); ++displayed;
             }
             key=cv::waitKey(1)&255; displayNs+=hostNs()-t;
         } else {
@@ -199,6 +220,7 @@ int runNativeLive(int argc,char** argv) {
             std::cout<<"FPS EVS packets="<<(stats[0].frames.load()-previous[0])/elapsed
                 <<" logical="<<(stats[0].logical.load()-previousLogical)/elapsed
                 <<" APS="<<(stats[1].frames.load()-previous[1])/elapsed
+                <<" ISP_Y_center_mean="<<yMean<<" Y_ge250_pct="<<yClipped
                 <<" preview="<<processed/elapsed<<" UI="<<displayed/elapsed<<" | "<<pairStatus
                 <<" age_ms EVS="<<(stats[0].lastNs? (now-stats[0].lastNs.load())/1e6:-1)
                 <<" APS="<<(stats[1].lastNs?(now-stats[1].lastNs.load())/1e6:-1)

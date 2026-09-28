@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 # Default params
-aps_bayer=none
 SESSION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --aps-bayer) aps_bayer="$2"; shift 2;;
     --session) SESSION="$2"; shift 2;;
     *) echo "Unknown option $1"; exit 1;;
   esac
@@ -18,5 +15,5 @@ if [[ -z "$SESSION" ]]; then
   exit 1
 fi
 
-python3 hvs.py play --aps-bayer "$aps_bayer" "$SESSION"
-
+python3 tools/check_native_recording.py "$SESSION" && \
+ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames,r_frame_rate,duration -of json "$SESSION/aps.avi"

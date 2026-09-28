@@ -51,18 +51,16 @@ python3 hvs.py live -- --help
 python3 hvs.py live -- --profile 1 --aps-exposure-us 5100 --aps-gain 1 --aps-dgain 1 --sync-tolerance-ms 25 --sync-wait-ms 40
 
 # 无显示，自动结束，记录实际吞吐和耗时。选择存在且可写的父目录。
-python3 hvs.py live -- --profile 1 --no-display --seconds 10 --record --output /tmp/hvs_native_5100 --aps-exposure-us 5100 --aps-wb off
+# 主要修改的参数是 --seconds 和 --output 
+python3 hvs.py live -- --profile 1 --no-display --seconds 5 --record --output /app/recordings/hvs_native_1000 --aps-exposure-us 1000 --aps-wb off
 
 # 固定场景和照明，在前次正常退出后改变曝光；比较属性读回和实际图像亮度。
 python3 hvs.py live -- --profile 1 --no-display --seconds 10 --record --output /tmp/hvs_native_2500 --aps-exposure-us 2500 --aps-wb off
 
-# 使用日志给出的实际会话目录替换 SESSION。
+# 使用日志给出的实际会话目录替换 SESSION，SESSION是在以上--output指定目录后会添加时间戳后缀
 python3 tools/check_native_recording.py SESSION
 ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames,r_frame_rate,duration -of json SESSION/aps.avi
 python3 hvs.py play --aps-bayer none --output SESSION 
-
-
-python3 tools/check_native_recording.py /tmp/hvs_native_5100
 
 ```
 
