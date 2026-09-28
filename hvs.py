@@ -93,6 +93,14 @@ def main(argv=None):
     b.add_argument('--cross', action='store_true')
     b.add_argument('--with-player', action='store_true')
     b.add_argument('--jobs', type=int, default=2)
+    b.add_argument('--with-native-live', action='store_true')
+    b.add_argument('--platform-samples', type=Path, default=Path('/app/multimedia_samples'))
+    b.add_argument('--sdk-root', type=Path, default=Path('/usr/hobot'))
+    b.add_argument('--sdk-include-dir', type=Path, action='append', default=[],
+                   help='Additional matching SDK header directory; repeat for split layouts')
+    live = sub.add_parser('live', help='Native dual VC + APS ISP approximate synchronized display')
+    live.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
+    live.add_argument('live_args', nargs=argparse.REMAINDER, help='Use -- then native options; --help for executable help')
     r = sub.add_parser('record', help='Start foreground recording; Ctrl+C gracefully stops')
     r.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     r.add_argument('--output', type=Path, required=True, help='New session directory; must not exist')
@@ -172,14 +180,28 @@ def main(argv=None):
         command = ['cmake', '-S', ROOT, '-B', build, '-DHV_TOOLKIT_ARCH=x5', '-DBUILD_SAMPLES=ON']
         if args.cross:
             command.append('-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'toolchains/toolchain-aarch64-linux-gnu.cmake'))
+        command += ['-DHV_X5_NATIVE=' + ('ON' if args.with_native_live else 'OFF')]
+        if args.with_native_live:
+            command += ['-DHV_PLATFORM_SAMPLES=' + str(args.platform_samples.resolve()),
+                        '-DHV_X5_SDK_ROOT=' + str(args.sdk_root.resolve()),
+                        '-DHV_X5_SDK_INCLUDE_DIRS=' + ';'.join(str(p.resolve()) for p in args.sdk_include_dir)]
         run(command)
         targets = ['hv_hvs_record', 'hv_hvs_raw_to_csv']
+        if args.with_native_live:
+            targets.append('hv_sample_live_record_display')
         if args.with_player:
             targets.append('hv_sample_player')
         check_build_targets(build, targets)
         run(['cmake', '--build', build, '--parallel', args.jobs, '--target', *targets])
         print('Built. Deploy the toolkit directory with lib/x5 and this build directory to X5.')
         return 0
+    if args.command == 'live':
+        cache = build / 'CMakeCache.txt'
+        if not cache.is_file() or 'HV_X5_NATIVE:BOOL=ON' not in cache.read_text():
+            raise RuntimeError('Build first with --with-native-live; native live never uses VIN bypass.')
+        binary = executable(build, 'hv_sample_live_record_display', 'live_record_display')
+        options = args.live_args[1:] if args.live_args[:1] == ['--'] else args.live_args
+        os.execve(str(binary), [str(binary), *options], runtime_env())
     if args.command == 'diagnose':
         print('Platform:', platform.platform(), platform.machine())
         print('SDK X5 libraries:', ROOT / 'lib/x5')

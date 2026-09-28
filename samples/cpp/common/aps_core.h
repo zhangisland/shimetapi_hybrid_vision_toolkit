@@ -81,7 +81,7 @@ struct WhiteBalance {
     Gains applied() const { return mode=="off"?Gains{1,1,1}:gains; }
 };
 inline std::string capabilities() {
-    return "APS hardware controls unavailable in bundled SDK: SetExposure ignores its argument; "
+    return "Legacy Camera interface (native live has separate ISP controls): SetExposure ignores its argument; "
            "no exposure range/unit/readback; SetFrameRate/GetFrameRate are EVS-only. "
            "APS FPS, native RAW8 selection, analog/digital gain, hardware AE/AWB: no public control/readback. "
            "Software AE disabled. NV12: hardware ISP output; Gray8 VIN bypass: RAW10 >> 2, derived Bayer8. "

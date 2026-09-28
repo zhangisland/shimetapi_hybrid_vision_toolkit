@@ -246,7 +246,15 @@ static int run(int argc, char** argv) {
     return failed?2:0;
 }
 
+#ifdef HV_X5_NATIVE
+int runNativeLive(int argc,char** argv);
+#endif
 int main(int argc,char** argv) {
+#ifdef HV_X5_NATIVE
+    try { return runNativeLive(argc,argv); }
+    catch(const std::exception& e) { std::cerr<<"Native live failed: "<<e.what()<<std::endl; return 2; }
+#else
     try { return run(argc,argv); }
     catch(const std::exception& e) { std::cerr<<"Live capture failed: "<<e.what()<<std::endl; return 2; }
+#endif
 }

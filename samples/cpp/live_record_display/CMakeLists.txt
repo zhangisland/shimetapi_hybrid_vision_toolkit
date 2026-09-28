@@ -33,3 +33,34 @@ else()
         message(STATUS "OpenCV not found — skipping hv_sample_live_record_display")
     endif()
 endif()
+
+option(HV_X5_NATIVE "Build official-example-based dual-VC VIN + APS ISP live path" OFF)
+set(HV_PLATFORM_SAMPLES "/app/multimedia_samples" CACHE PATH "Matching official multimedia_samples source tree")
+set(HV_X5_SDK_ROOT "/usr/hobot" CACHE PATH "Matching X5 SDK prefix (include and lib)")
+set(HV_X5_SDK_INCLUDE_DIRS "" CACHE STRING "Additional matching X5 SDK include directories")
+if(HV_X5_NATIVE)
+    if(NOT HV_TOOLKIT_ARCH_DIR STREQUAL "x5" OR NOT TARGET hv_sample_live_record_display)
+        message(FATAL_ERROR "HV_X5_NATIVE requires x5 and OpenCV development libraries")
+    endif()
+    enable_language(C)
+    set(_dual "${HV_PLATFORM_SAMPLES}/sample_apx003cc/sample_hvs/dual_vc_vin_src")
+    include("${CMAKE_CURRENT_LIST_DIR}/FindX5Sdk.cmake")
+    hv_find_x5_sdk(_x5_sdk_includes)
+    foreach(_file "${HV_PLATFORM_SAMPLES}/vp_sensors/vp_sensors.c"
+                  "${_dual}/src/hvs_config.c")
+        if(NOT EXISTS "${_file}")
+            message(FATAL_ERROR "Native capture needs matching SDK/sample source: ${_file}")
+        endif()
+    endforeach()
+    # Same vp_sensors compilation set as the official Makefile; do not replace
+    # the board's sensor driver or link stale sensor object files from a bundle.
+    file(GLOB_RECURSE _sensor_sources CONFIGURE_DEPENDS "${HV_PLATFORM_SAMPLES}/vp_sensors/*.c")
+    target_sources(hv_sample_live_record_display PRIVATE native_live.cpp x5_capture.c
+        "${_dual}/src/hvs_config.c" ${_sensor_sources})
+    target_compile_definitions(hv_sample_live_record_display PRIVATE HV_X5_NATIVE=1)
+    target_include_directories(hv_sample_live_record_display PRIVATE
+        ${_x5_sdk_includes}
+        "${HV_PLATFORM_SAMPLES}/vp_sensors" "${_dual}/include")
+    target_link_directories(hv_sample_live_record_display PRIVATE "${HV_X5_SDK_ROOT}/lib")
+    target_link_libraries(hv_sample_live_record_display PRIVATE cam vpf hbmem pthread m)
+endif()

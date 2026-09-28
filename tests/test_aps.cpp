@@ -37,6 +37,18 @@ int main() {
         isp.process(frame); nv12.back()=127; rejects([&]{isp.process(frame);});
         isp.pattern="none"; CHECK(!isp.process(frame).empty()); CHECK(isp.raw.empty());
     }
+    {
+        std::vector<uint8_t> nv12(32*32*3/2,128); std::fill_n(nv12.data(),32*32,100);
+        auto original=nv12; Shimeta::Frame f; f.width=f.height=32;f.format=Shimeta::PixelFormat::NV12;f.aps={nv12.data(),nv12.size()};
+        hv_player::ApsIsp plain; auto baseline=plain.process(f).clone();
+        hv_player::ApsIsp residual; residual.ispOutputCorrection=true;
+        residual.config.black=200;residual.config.gamma=8;residual.config.mode="manual";residual.config.gains={2,1,1};
+        auto corrected=residual.process(f).clone();
+        auto b=baseline.at<cv::Vec3b>(16,16),c=corrected.at<cv::Vec3b>(16,16);
+        CHECK(c[0]==b[0] && c[1]==b[1] && std::abs(int(c[2])-std::min(255,int(b[2])*2))<=1);
+        residual.ispOutputCorrection=false;CHECK(cv::norm(baseline,residual.process(f),cv::NORM_INF)==0);
+        CHECK(nv12==original);
+    }
     std::vector<hv_aps::Gains> mono;
     for(int i=0;i<256;++i) {double y=.15+.4*i/256;mono.push_back({y*.7,y,y*.8});}
     CHECK(!hv_aps::estimate(mono,c).valid);

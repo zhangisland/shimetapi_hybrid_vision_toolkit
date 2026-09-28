@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Bundled SDK; no hardware probe; do not infer sensor capabilities",
+  "scope": "Legacy prebuilt Camera interface; native live backend has separate capabilities below. No hardware probe.",
   "exposure": {
     "available": false,
     "requested": null,
@@ -61,5 +61,16 @@
     "x5": "6ae0ae6ba5335f8a2f09b546ab49ccade1e22474ddd5e161a9bdb5f78b147f4f",
     "s100": "b2be3e047c4723c818f0d76564937a0a66d3a7542393443cb5b4e2f13faa9d91",
     "x86_64": "b90a7480d8e1398db95c821ecf324614abb5483f120a476bfa410dd141d1d3bc"
+  },
+  "native_live": {
+    "entry": "hvs.py build --with-native-live; hvs.py live -- --help",
+    "exposure_request_unit": "microseconds (SDK seconds)",
+    "gain_request": "manual analog and digital gain multipliers",
+    "configuration": "initialization only; real hbn_isp_get/set_exposure_attr, errors checked",
+    "actual_frame_exposure": null,
+    "range": "sensor limits unavailable locally; positive finite requests delegated to matching SDK",
+    "ae_auto": "disabled for this HVS sensor_mode=2 profile per official sample nonconvergence",
+    "awb": "ISP manual neutral gains; existing application residual WB optional for NV12",
+    "verified": "Windows simulated backend only; X5 SDK compile and physical exposure effect pending"
   }
 }

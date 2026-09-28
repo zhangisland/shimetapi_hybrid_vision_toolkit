@@ -28,6 +28,7 @@ struct ApsIsp {
     hv_aps::WhiteBalance wb;
     std::string pattern="none", geometry;
     cv::Mat raw,black,balanced,linear,display;
+    bool ispOutputCorrection=false; // NV12 residual WB only; ISP owns CCM/gamma
     double saturated=0; uint64_t frames=0;
     ApsIsp() { wb.setMode(config.mode,config,false); }
     void load(const std::string& path) {
@@ -65,7 +66,7 @@ struct ApsIsp {
         c.validate(); config=c; wb.setMode(c.mode,c,false);
     }
     void mode(const std::string& m) {
-        if(pattern=="none" || pattern=="compare") { std::cerr<<"Software WB requires one explicit Bayer pattern; not applied"<<std::endl; return; }
+        if((pattern=="none" && !ispOutputCorrection) || pattern=="compare") { std::cerr<<"Software WB requires one explicit Bayer pattern; not applied"<<std::endl; return; }
         wb.setMode(m,config); config.mode=m;
         if(m=="manual") config.gains=wb.gains;
     }
@@ -86,6 +87,24 @@ struct ApsIsp {
             else {
                 cv::Mat uv(f.height/2,f.width/2,CV_8UC2,const_cast<uint8_t*>(f.aps.data+n));
                 cv::cvtColorTwoPlane(y,uv,display,cv::COLOR_YUV2BGR_NV12);
+            }
+            if(ispOutputCorrection) {
+                if(gray) throw std::runtime_error("ISP residual correction requires NV12");
+                // ISP output is encoded BGR8, not linear RAW. Reuse the existing
+                // conservative RGB estimator; do not apply RAW black/CCM/gamma.
+                std::vector<hv_aps::Gains> cells;
+                const int step=std::max(1,f.width/128);
+                for(int r=0;r<display.rows;r+=step) for(int c=0;c<display.cols;c+=step) {
+                    const auto v=display.at<cv::Vec3b>(r,c);
+                    cells.push_back({v[2]/255.,v[1]/255.,v[0]/255.});
+                }
+                wb.update(hv_aps::estimate(cells,config));
+                const auto gains=wb.applied();
+                cv::Mat lut(1,256,CV_8UC3);
+                for(int i=0;i<256;++i) for(int c=0;c<3;++c)
+                    lut.at<cv::Vec3b>(0,i)[c]=cv::saturate_cast<uint8_t>(i*gains[2-c]);
+                cv::LUT(display,lut,display);
+                ++frames;
             }
             return display;
         }
@@ -133,7 +152,7 @@ struct ApsIsp {
         ++frames; return display;
     }
     std::string status() const {
-        if(pattern=="none" || pattern=="compare") return geometry+" SW-WB not applied; exposure/gain/device FPS unknown";
+        if((pattern=="none" && !ispOutputCorrection) || pattern=="compare") return geometry+" SW-WB not applied; exposure/gain/device FPS unknown";
         auto g=wb.applied();
         return geometry+" SW-WB="+wb.mode+" RGB="+std::to_string(g[0])+","+std::to_string(g[1])+","+std::to_string(g[2])+
             " samples="+std::to_string(wb.last.samples)+" confidence="+std::to_string(wb.last.confidence)+

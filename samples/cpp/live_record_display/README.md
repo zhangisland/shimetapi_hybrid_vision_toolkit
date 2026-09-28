@@ -1,3 +1,5 @@
+> X5 原生双 VC / APS ISP / 近似时间配对入口已接入现有程序，见 [构建与验证说明](../../../NATIVE_DUAL_VC_LIVE.md)。启用 `hvs.py build --with-native-live` 后使用 `hvs.py live`。下文旧 Camera 路径说明仍保留。
+
 # live_record_display —— MIPI-HVS 实时预览与按键录制
 
 **语言**: **中文**

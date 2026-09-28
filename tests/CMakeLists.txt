@@ -55,3 +55,30 @@ endif()
 
 add_executable(avi_timing_test test_avi_timing.cpp)
 add_test(NAME avi_timing_test COMMAND avi_timing_test)
+
+add_executable(frame_sync_test test_frame_sync.cpp)
+add_test(NAME frame_sync COMMAND frame_sync_test)
+add_executable(native_live_fake ../samples/cpp/live_record_display/main.cpp
+    ../samples/cpp/live_record_display/native_live.cpp
+    ../samples/cpp/live_record_display/live_widgets.cpp fake_sdk.cpp fake_x5_capture.cpp)
+target_compile_definitions(native_live_fake PRIVATE HV_X5_NATIVE=1)
+target_include_directories(native_live_fake PRIVATE ../include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(native_live_fake PRIVATE ${OpenCV_LIBS})
+if(MSVC)
+    target_compile_options(native_live_fake PRIVATE /utf-8)
+endif()
+add_test(NAME native_independent_stall COMMAND native_live_fake --no-display --seconds 1.2)
+set_tests_properties(native_independent_stall PROPERTIES PASS_REGULAR_EXPRESSION "unmatched=[1-9]" TIMEOUT 10)
+add_test(NAME native_reject_bayer COMMAND native_live_fake --aps-bayer gbrg)
+set_tests_properties(native_reject_bayer PROPERTIES WILL_FAIL TRUE)
+
+add_executable(native_record_test test_native_record.cpp fake_sdk.cpp)
+target_include_directories(native_record_test PRIVATE ../include)
+add_test(NAME native_record_timing COMMAND native_record_test)
+
+if(MSVC)
+    target_compile_options(native_record_test PRIVATE /utf-8)
+endif()
+
+add_test(NAME native_bad_stride_cleanup COMMAND native_live_fake --no-display --seconds 1)
+set_tests_properties(native_bad_stride_cleanup PROPERTIES ENVIRONMENT "HVS_FAKE_BAD_STRIDE=1" WILL_FAIL TRUE TIMEOUT 10)
