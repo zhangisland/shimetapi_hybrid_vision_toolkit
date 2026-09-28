@@ -70,7 +70,7 @@ def image_stats(session, warmup, sample_seconds):
     command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
                '-ss', str(warmup), '-i', str(session / 'aps.avi'), '-t', str(sample_seconds),
                '-map', '0:v:0', '-an', '-vf',
-               'crop=iw/2:ih/2:iw/4:ih/4,extractplanes=y,scale=64:48:flags=area',
+               'crop=iw/2:ih/2:iw/4:ih/4,format=yuv420p,extractplanes=y,scale=64:48:flags=area',
                '-frames:v', '120', '-pix_fmt', 'gray', '-f', 'rawvideo', 'pipe:1']
     decoded = subprocess.run(command, capture_output=True, timeout=90)
     if decoded.returncode:
