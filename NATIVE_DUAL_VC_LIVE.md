@@ -2,13 +2,15 @@
 
 本次接入的是现有 `hv_sample_live_record_display` 可执行程序的原生构建路径，启动入口为 `hvs.py live`。旧 `hvs.py record` 和 VIN bypass 仍保留，旧录制器的平均接收 FPS、逐帧接收时间和回调耗时修复未改动。
 
+详细控制链路审计及此次修补边界见 [APX003CC_EXPOSURE_AUDIT.md](APX003CC_EXPOSURE_AUDIT.md)。
+
 ## 源码依据与边界
 
 依据本地 `multimedia_samples/sample_apx003cc/sample_hvs/dual_vc_vin_src/dual_vc_vin.c`、其 `hvs_config.{h,c}`、Makefile 和 `vp_sensors/apx003cc/hvs_aps_binning_evs_240fps_4lane*.c` 实施。读取了参考树中 `utils/common_utils.h` 以及 ISP 图像结构使用示例。指定目录及工程祖先未发现适用 AGENTS.md；修改开始时 git 状态干净。
 
 官方路径：VC0 RAW8 VIN；VC1 RAW10 VIN → 离线 ISP（input_mode=2、flyby=0、端口 0 绑定）→ NV12。默认 profile 1 的配置为 EVS 4096×256 字节包、APS 1632×1224；程序使用运行时图像尺寸与 stride，并拒绝非 NV12 APS。共享 MIPI 仅调用一次探测，然后共享 RX 与 CSI 配置，按官方顺序为两个 VC 各建一个 camera 对象；不会再调用预编译 Camera.Init。两路各自启动 vflow，APS 启动后配置手动 AE/AWB。退出先结束采集线程，再逆序清理，包括初始化中途失败的句柄。
 
-当前机器缺少实际 `hbn_isp_api.h` 等完整 X5 SDK 头文件；没有完成原生 C 适配器的 SDK 编译/链接验证。WSL Ubuntu 虚拟磁盘 `G:\WSL\ext4.vhdx` 缺失，交叉编译不可用。未确认可用开发板连接，未启动或停止板端进程、未覆盖板端安装。
+2026-09-29 已读取用户提供的 `RDK_X5_usr_include/usr/include/hbn_isp_api.h` 等头文件；尚未完成原生 C 适配器的 X5 编译/链接验证。WSL Ubuntu 虚拟磁盘 `G:\WSL\ext4.vhdx` 缺失，交叉编译不可用。未确认可用开发板连接，未启动或停止板端进程、未覆盖板端安装。
 
 ## 数据与线程
 
@@ -23,7 +25,7 @@
 
 ## 曝光和颜色职责
 
-`--aps-exposure-us` 单位微秒，转换为 SDK `manual_attr.exp_time` 的秒；`--aps-gain` 为模拟增益倍数，`--aps-dgain` 为数字增益倍数。默认请求 5100 us / 1 / 1，用于对照用户日志；不是已测量值。实际调用 get → 修改 manual 字段 → set，检查返回码，随后独立 get 读回并标为属性读回。没有逐帧曝光反馈，录像实际曝光字段为 unknown。参数仅做有限正数和浮点可表示性检查，传感器范围及量化交给匹配 SDK，未臆造硬件范围。API 接受不等于曝光已经在传感器生效。
+`--aps-exposure-us` 单位微秒，转换为 SDK `manual_attr.exp_time` 的秒；`--aps-gain`、`--aps-dgain` 原样转换为 SDK 的模拟/数字增益 float 字段。所查头文件及官方 API 文档没有明确其倍率/dB/编码语义，之前写成“倍数”缺少依据；不能据此认定 1 或 0 为传感器最小增益。默认请求 5100 us / 1 / 1，用于对照用户日志；不是已测量值。实际调用 get → 修改 manual 字段 → set，检查返回码，随后独立 get 读回并标为属性读回；回读失败或非有限数据会中止初始化。没有逐帧曝光反馈，录像实际曝光字段为 unknown。参数仅做有限正数和浮点可表示性检查，传感器范围及量化交给匹配 SDK，未臆造硬件范围。API 接受不等于曝光已经在传感器生效。
 
 当前入口只实现初始化设置，改变曝光需正常退出后重启。`--aps-ae auto` 明确拒绝：官方示例说明该 HVS sensor_mode=2 的 HDR AE 路径不收敛；未把存在 AUTO 枚举作为可用证据。ISP AWB 锁定四通道中性增益 1，检查失败并退出。
 

@@ -78,6 +78,50 @@ def image_stats(session, warmup, sample_seconds):
     return pixel_stats(decoded.stdout)
 
 
+def assess_response(rows):
+    """Conservative screening, not a measurement of sensor integration time.
+
+    Requires a controlled scene. Thresholds are explicit heuristics, not sensor
+    limits or a claim that ISP Y is linear in exposure.
+    """
+    result = dict(status='inconclusive', sensor_exposure_verified=False,
+                  thresholds=dict(min_exposure_span=4.0, min_y_rise=10.0,
+                                  min_y_ratio=1.2, max_clipped_pct=95.0),
+                  reason='Need at least three distinct exposures under fixed light/aperture/gains')
+    rows = sorted(rows, key=lambda row: row['requested_us'])
+    if len({row['requested_us'] for row in rows}) < 3:
+        return result
+    for row in rows:
+        if row.get('readback_us') is None or not row.get('api_set_accepted'):
+            result['reason'] = 'Missing SDK acceptance/readback; no imaging verdict'
+            return result
+        if row['y_ge235_pct_median'] >= 95 or row['y_le20_pct_median'] >= 95:
+            result['reason'] = 'ROI saturated or too dark; use an unsaturated scene'
+            return result
+    gains = {(row.get('readback_again'), row.get('readback_dgain')) for row in rows}
+    if len(gains) != 1 or None in next(iter(gains)):
+        result['reason'] = 'SDK gain readbacks missing or not fixed'
+        return result
+    first, last = rows[0], rows[-1]
+    if last['requested_us'] / first['requested_us'] < 4:
+        result['reason'] = 'Exposure span too small for this screening test'
+        return result
+    if last['readback_us'] <= first['readback_us']:
+        result.update(status='failed', reason='SDK exposure readback did not increase')
+        return result
+    noise = max(5.0, 3 * max(row.get('y_mean_stdev', 0) for row in rows))
+    rise = last['y_mean_median'] - first['y_mean_median']
+    ratio = last['y_mean_median'] / first['y_mean_median'] if first['y_mean_median'] > 0 else 0
+    if rise < max(10.0, noise) or ratio < 1.2:
+        result.update(status='failed', reason='SDK readback changed but no clear brightness increase',
+                      y_rise=rise, y_ratio=ratio, noise_threshold=noise)
+    elif any(b['y_mean_median'] < a['y_mean_median'] - noise for a, b in zip(rows, rows[1:])):
+        result.update(status='failed', reason='Brightness response is not consistently increasing')
+    else:
+        result.update(status='response_observed', reason='Imaging response observed; sensor integration time remains unverified')
+    return result
+
+
 def analyze(entries, output, warmup=1.0, sample_seconds=3.0):
     if not shutil.which('ffmpeg'):
         raise RuntimeError('ffmpeg is required (ffprobe alone cannot decode pixels)')
@@ -116,6 +160,7 @@ def analyze(entries, output, warmup=1.0, sample_seconds=3.0):
                                'ISP gamma/tone processing and Y black offset prevent linear exposure-ratio claims.',
                                'Frame rate/count cannot validate exposure. Large Y variation may indicate flicker or scene changes.',
                                'A brightness response is evidence of imaging response, not a measured integration time.'])
+    report['response_assessment'] = assess_response(rows)
     (output / 'comparison.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
     with (output / 'comparison.csv').open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
@@ -125,6 +170,7 @@ def analyze(entries, output, warmup=1.0, sample_seconds=3.0):
         print(f"{row['requested_us']:12g}  {str(row['readback_us']):>11}  {row['y_mean_median']:9.3f}  "
               f"{str(round(row['y_ratio_to_shortest'], 3)) if row['y_ratio_to_shortest'] is not None else 'unknown':>7}  "
               f"{row['y_ge235_pct_median']:11.2f}  {row['fps']:6.2f}  {row['frames']:6d}")
+    print('Response assessment:', report['response_assessment']['status'], '-', report['response_assessment']['reason'])
     print('Saved:', output)
     print('Readback is not actual sensor exposure. Compare Y statistics under fixed scene/lighting/gains.')
     return report
@@ -189,7 +235,7 @@ def capture(args):
         entries.append(dict(requested_us=exposure, requested_again=args.gain, requested_dgain=args.dgain,
                             session=str(sessions[0]), log=str(log)))
         (output / 'manifest.json').write_text(json.dumps(entries, indent=2), encoding='utf-8')
-    analyze(entries, output / 'analysis', args.warmup, args.sample_seconds)
+    return analyze(entries, output / 'analysis', args.warmup, args.sample_seconds)
 
 
 def parse_session(text):
@@ -221,17 +267,18 @@ def main(argv=None):
     if args.mode == 'capture':
         if len(args.exposures_us) < 2:
             parser.error('Use at least two exposures')
-        capture(args)
+        report = capture(args)
     else:
         if bool(args.session) == bool(args.manifest):
             parser.error('Use --session entries OR --manifest')
         entries = json.loads(args.manifest.read_text()) if args.manifest else args.session
-        analyze(entries, args.output, args.warmup, args.sample_seconds)
+        report = analyze(entries, args.output, args.warmup, args.sample_seconds)
+    return 0 if report['response_assessment']['status'] == 'response_observed' else 2
 
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:

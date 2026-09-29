@@ -9,7 +9,13 @@ int main() {
     auto root=fs::temp_directory_path()/("native-record-test-"+std::to_string(hv_live::hostNs()));fs::create_directory(root);
     fake::files=true;
     {
-        hv_live::NativeRecorder r;CHECK(r.start((root/"session").string()));
+        x5_exposure_state exposure{};
+        exposure.requested_us=50; exposure.submitted_seconds=0.00005f;
+        exposure.readback_seconds=0.000048f; exposure.set_accepted=exposure.readback_available=1;
+        exposure.requested_again=exposure.requested_dgain=1;
+        exposure.submitted_again=exposure.submitted_dgain=1;
+        exposure.readback_again=exposure.readback_dgain=1;
+        hv_live::NativeRecorder r(exposure);CHECK(r.start((root/"session").string()));
         Shimeta::Frame f;f.width=f.height=32;f.format=Shimeta::PixelFormat::NV12;
         f.aps_owner.reset(new uint8_t[1536]);f.aps={f.aps_owner.get(),1536};
         auto oversized=f; oversized.aps.size=65ULL*1024*1024;
@@ -21,6 +27,11 @@ int main() {
     std::ifstream input(session/"summary.txt");std::map<std::string,std::string> summary;std::string line;
     while(std::getline(input,line)){auto eq=line.find('=');if(eq!=std::string::npos)summary[line.substr(0,eq)]=line.substr(eq+1);}
     CHECK(summary["status"]=="complete" && summary["queue_dropped"]=="1");
+    CHECK(summary["aps_exposure_actual_us"]=="unknown");
+    CHECK(summary["aps_ae_readback"]=="unknown");
+    CHECK(std::stod(summary["aps_exposure_requested_us"])==50);
+    CHECK(std::abs(std::stod(summary["aps_exposure_readback_seconds"])-0.000048)<1e-10);
+    CHECK(summary["aps_exposure_submitted_seconds"]!=summary["aps_exposure_readback_seconds"]);
     CHECK(summary["aps_frames"]=="55");CHECK(std::abs(std::stod(summary["aps_observed_fps"])-13.75)<1e-4);
     CHECK(std::abs(std::stod(summary["avi_duration_seconds"])-4)<1e-4);
     std::ifstream avi(session/"aps.avi",std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(avi)),{});avi.close();

@@ -10,12 +10,14 @@ class LiveCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
             (folder/'CMakeCache.txt').write_text('HV_X5_NATIVE:BOOL=ON')
-            with mock.patch.object(hvs, 'executable', return_value=Path('/fake/live')), \
+            binary=folder/'live'
+            binary.write_bytes(b'fake executable')
+            with mock.patch.object(hvs, 'executable', return_value=binary), \
                  mock.patch.object(hvs.os, 'execve', side_effect=SystemExit) as execute:
                 with self.assertRaises(SystemExit):
                     hvs.main(['live','--build-dir',str(folder),'--','--aps-exposure-us','2500','--record'])
                 command=execute.call_args.args[1]
-                self.assertEqual(command,[str(Path('/fake/live')),'--aps-exposure-us','2500','--record'])
+                self.assertEqual(command,[str(binary),'--aps-exposure-us','2500','--record'])
                 self.assertNotIn('vin-bypass',execute.call_args.args[2]['LD_LIBRARY_PATH'])
 
     @mock.patch.object(hvs.platform, 'system', return_value='Linux')
@@ -23,3 +25,10 @@ class LiveCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError,'with-native-live'):
                 hvs.main(['live','--build-dir',tmp])
+
+    def test_old_metadata_remains_unknown(self):
+        import io
+        with mock.patch('sys.stdout', new_callable=io.StringIO) as output:
+            hvs.print_exposure_summary({'aps_exposure_requested_us': '50'})
+        self.assertIn('aps_exposure_actual_us=unknown', output.getvalue())
+        self.assertIn('aps_exposure_readback_seconds=unknown', output.getvalue())

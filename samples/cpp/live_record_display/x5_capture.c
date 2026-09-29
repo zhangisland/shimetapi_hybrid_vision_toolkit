@@ -9,6 +9,7 @@
 #include "hbn_isp_api.h"
 #include "vp_sensors.h"
 #include "hvs_config.h"
+#include "x5_exposure_control.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,9 +25,8 @@ typedef struct {
     vp_csi_config_t csi_config;
 } pipe_contex_t;
 typedef struct { pipe_contex_t pipe_contex; int sensor_index; uint32_t link_port; } dual_vc_pipe_t;
-struct x5_capture { dual_vc_pipe_t pipes[2]; int memory_open; };
+struct x5_capture { dual_vc_pipe_t pipes[2]; int memory_open; x5_exposure_state exposure; };
 static int settle = -1;
-static double requested_us, requested_again, requested_dgain;
 static int find_sensor_index_by_config_file(const char *config_file)
 {
 	int total = vp_get_sensors_list_number();
@@ -233,29 +233,11 @@ static int create_isp_node(dual_vc_pipe_t *pipe)
 /* HVS sensor_mode=2 makes the AE engine run the hdrv31 path, which never
  * converges on this single-channel pipeline. Lock AE to manual exposure
  * (and AWB to manual gains) so the ISP outputs stable frames. */
-static int isp_set_manual_2a(hbn_vnode_handle_t isp_node_handle)
+static int isp_set_manual_2a(hbn_vnode_handle_t isp_node_handle, x5_exposure_state *state)
 {
-	hbn_isp_exposure_attr_t exp_attr = {0};
-	hbn_isp_awb_attr_t awb_attr = {0};
-	int32_t ret = 0;
-
-	ret = hbn_isp_get_exposure_attr(isp_node_handle, &exp_attr);
-	if (ret != 0) {
-		printf("hbn_isp_get_exposure_attr failed, ret:%d\n", ret);
-		return ret;
-	}
-	exp_attr.mode = HBN_ISP_MODE_MANUAL;
-	exp_attr.manual_attr.exp_time = (float)(requested_us / 1000000.0);
-	exp_attr.manual_attr.again = (float)requested_again;
-	exp_attr.manual_attr.dgain = (float)requested_dgain;
-	ret = hbn_isp_set_exposure_attr(isp_node_handle, &exp_attr);
-	if (ret != 0) {
-		printf("hbn_isp_set_exposure_attr failed, ret:%d\n", ret);
-		return ret;
-	}
-	printf("ISP AE API accepted request (not frame measurement): exp_time=%.4fs again=%.2f dgain=%.2f\n",
-		exp_attr.manual_attr.exp_time, exp_attr.manual_attr.again,
-		exp_attr.manual_attr.dgain);
+    hbn_isp_awb_attr_t awb_attr = {0};
+    int ret = x5_apply_exposure(isp_node_handle, state);
+    if (ret) return ret;
 
 	ret = hbn_isp_get_awb_attr(isp_node_handle, &awb_attr);
 	if (ret != 0) {
@@ -276,12 +258,6 @@ static int isp_set_manual_2a(hbn_vnode_handle_t isp_node_handle)
 	printf("ISP AWB locked to manual: rgain=%.3f bgain=%.3f\n",
 		awb_attr.manual_attr.gain.rgain, awb_attr.manual_attr.gain.bgain);
 
-	hbn_isp_exposure_attr_t readback = {0};
-	ret = hbn_isp_get_exposure_attr(isp_node_handle, &readback);
-	if (ret == 0)
-		printf("ISP attribute readback (not per-frame exposure): seconds=%g again=%g dgain=%g\n",
-			readback.manual_attr.exp_time, readback.manual_attr.again, readback.manual_attr.dgain);
-	else fprintf(stderr, "ISP attribute readback unavailable: %d\n", ret);
 	return 0;
 }
 
@@ -333,11 +309,6 @@ static int create_and_run_vflow(dual_vc_pipe_t *pipe)
 	ret = hbn_vflow_start(pipe->pipe_contex.vflow_fd);
 	ERR_CON_EQ(ret, 0);
 
-	if (with_isp) {
-		/* Disable the auto AE/AWB loop for the HVS APS pipeline. */
-		ret = isp_set_manual_2a(pipe->pipe_contex.isp_node_handle);
-		if (ret != 0) return ret;
-	}
 
 	return 0;
 }
@@ -368,17 +339,14 @@ void x5_close(x5_capture *capture) {
 }
 int x5_open(x5_capture **out, int profile, double exposure_us, double again, double dgain) {
     *out = NULL;
-    /* Positive finite values only; no invented sensor limits. Matching SDK
-       validates range/quantization and every setter return is checked. */
-    if (!isfinite(exposure_us) || exposure_us<=0 || !isfinite(again) || again<=0 ||
-        !isfinite(dgain) || dgain<=0 || !isfinite((float)(exposure_us/1e6)) ||
-        !isfinite((float)again) || !isfinite((float)dgain) ||
-        (float)(exposure_us/1e6)<=0 || (float)again<=0 || (float)dgain<=0) return -1;
+    x5_exposure_state state;
+    int validation=x5_exposure_request(&state,exposure_us,again,dgain);
+    if(validation) return validation;
     const hvs_config_pair_t *cfg=hvs_config_get(profile);
     if (!cfg) return -1;
     x5_capture *c=calloc(1,sizeof(*c));
     if (!c) return -1;
-    requested_us=exposure_us; requested_again=again; requested_dgain=dgain;
+    c->exposure=state;
     int ret=-1;
     for(int i=0;i<2;++i) {
         int index=find_sensor_index_by_config_file(i ? cfg->vc1_cfg : cfg->vc0_cfg);
@@ -393,6 +361,11 @@ int x5_open(x5_capture **out, int profile, double exposure_us, double again, dou
     /* Official sequence: one camera object per VC, probe shared RX only once.
        Do not additionally initialize the toolkit Camera on this path. */
     for(int i=0;i<2;++i) if((ret=create_and_run_vflow(&c->pipes[i]))!=0) goto fail;
+    /* Both camera initializations/start sequences must finish before controls.
+       Keep the sample's dual-camera ownership until driver semantics are known. */
+    fprintf(stderr, "Exposure control stage=after_both_vflows_started profile=%d APS_config=%s sensor_actual=unknown\n", profile, cfg->vc1_cfg);
+    ret=isp_set_manual_2a(c->pipes[1].pipe_contex.isp_node_handle, &c->exposure);
+    if(ret) goto fail;
     *out=c; return 0;
 fail:
     x5_close(c); return ret ? ret : -1;
@@ -428,4 +401,10 @@ int x5_release(x5_capture *c, int aps, x5_image *image) {
     if(ret) fprintf(stderr,"hbn_vnode_releaseframe failed: %d\n",ret);
     free(image->lease); image->lease=NULL;
     return ret;
+}
+
+int x5_get_exposure_state(const x5_capture *c, x5_exposure_state *out) {
+    if (!c || !out) return X5_CAPTURE_FATAL;
+    *out=c->exposure;
+    return 0;
 }

@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [--profile N] [--aps-exposure-us US] [--aps-gain G] [--aps-dgain G] [--sync-tolerance-ms MS] [--sync-wait-ms MS]"
             echo "  --profile N              profile id (default: 1)"
-            echo "  --aps-exposure-us US     APS exposure in microseconds (default: 5100)"
+            echo "  --aps-exposure-us US     APS exposure in microseconds (default: 1000)"
             echo "  --aps-gain G             APS analog gain (default: 1)"
             echo "  --aps-dgain G            APS digital gain (default: 1)"
             echo "  --sync-tolerance-ms MS   sync tolerance (default: 25)"

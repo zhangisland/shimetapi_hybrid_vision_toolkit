@@ -29,6 +29,25 @@ class ExposureCompareTests(unittest.TestCase):
             self.assertTrue(result['api_set_accepted'])
             self.assertAlmostEqual(result['readback_us'], 996.169)
 
+    def test_board_sweep_does_not_pass_on_sdk_readback(self):
+        rows = [dict(requested_us=e, readback_us=r, readback_again=1,
+                     readback_dgain=1, api_set_accepted=True, y_mean_median=y,
+                     y_ge235_pct_median=17, y_le20_pct_median=0, y_mean_stdev=0.2)
+                for e, r, y in ((500,498.084293,148.635),
+                                 (1000,996.168586,140.614),
+                                 (5000,4993.61428,148.989))]
+        verdict = ec.assess_response(rows)
+        self.assertEqual(verdict['status'], 'failed')
+        self.assertFalse(verdict['sensor_exposure_verified'])
+        for row, y in zip(rows, (40,65,120)):
+            row['y_mean_median'] = y
+        self.assertEqual(ec.assess_response(rows)['status'], 'response_observed')
+        rows[1]['y_ge235_pct_median'] = 99
+        self.assertEqual(ec.assess_response(rows)['status'], 'inconclusive')
+        rows[1]['y_ge235_pct_median'] = 0
+        rows[1]['readback_dgain'] = 2
+        self.assertEqual(ec.assess_response(rows)['status'], 'inconclusive')
+
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg unavailable')
     def test_real_nv12_decode_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:

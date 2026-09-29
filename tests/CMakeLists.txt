@@ -82,3 +82,15 @@ endif()
 
 add_test(NAME native_bad_stride_cleanup COMMAND native_live_fake --no-display --seconds 1)
 set_tests_properties(native_bad_stride_cleanup PROPERTIES ENVIRONMENT "HVS_FAKE_BAD_STRIDE=1" WILL_FAIL TRUE TIMEOUT 10)
+
+add_executable(native_exposure_test test_native_exposure.cpp)
+add_test(NAME native_exposure_contract COMMAND native_exposure_test)
+
+add_test(NAME native_cli_profile_after_exposure COMMAND native_live_fake
+    --no-display --seconds 0.1 --aps-exposure-us 50 --aps-gain 2 --aps-dgain 10 --profile 3)
+add_test(NAME native_cli_profile_before_exposure COMMAND native_live_fake
+    --no-display --seconds 0.1 --profile 3 --aps-exposure-us 50 --aps-gain 2 --aps-dgain 10)
+set_tests_properties(native_cli_profile_after_exposure native_cli_profile_before_exposure
+    PROPERTIES ENVIRONMENT "HVS_FAKE_EXPECT_CONTROLS=3,50,2,10" TIMEOUT 10)
+add_test(NAME native_control_failure COMMAND native_live_fake --no-display --seconds 0.1)
+set_tests_properties(native_control_failure PROPERTIES ENVIRONMENT "HVS_FAKE_OPEN_ERROR=1" WILL_FAIL TRUE TIMEOUT 10)

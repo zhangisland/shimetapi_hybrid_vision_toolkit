@@ -7,6 +7,14 @@ extern "C" {
 #define X5_CAPTURE_FATAL (-200000001) /* adapter validation/allocation failure, not SDK timeout */
 typedef struct x5_capture x5_capture;
 typedef struct {
+    double requested_us, requested_again, requested_dgain;
+    float submitted_seconds, submitted_again, submitted_dgain, submitted_ispgain;
+    float readback_seconds, readback_again, readback_dgain, readback_ispgain;
+    int set_accepted, readback_available;
+} x5_exposure_state;
+/* Configuration snapshot only: never sensor actual/per-frame measurements. */
+int x5_get_exposure_state(const x5_capture *, x5_exposure_state *);
+typedef struct {
     const uint8_t *plane[2];
     size_t size[2];
     int width, height, stride, frame_id;

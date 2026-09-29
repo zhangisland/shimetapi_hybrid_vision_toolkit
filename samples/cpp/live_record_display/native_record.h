@@ -1,5 +1,7 @@
 #pragma once
 #include "frame_sync.h"
+#include "x5_capture.h"
+#include <iomanip>
 #include "../hvs_record/dual_stream_writer.h"
 #include "../hvs_record/avi_timing.h"
 #include <atomic>
@@ -13,7 +15,7 @@ namespace hv_live {
 class NativeRecorder {
 public:
     using Item=Timed<Shimeta::Frame>;
-    NativeRecorder(): worker([this]{run();}) {}
+    NativeRecorder(x5_exposure_state state = {}): exposure(state), worker([this]{run();}) {}
     ~NativeRecorder() { shutdown(); }
     void shutdown() { {std::lock_guard<std::mutex> l(m); accepting=false; quitting=true;} cv.notify_one(); if(worker.joinable()) worker.join(); }
     bool failed() {std::lock_guard<std::mutex> l(m); return !error.empty();}
@@ -57,6 +59,29 @@ private:
                     <<"\naps_storage_format=ISP_NV12_uncorrected\n"
                     <<"timeline=constant_average_rate; irregular intervals retained in aps.frames.csv\n"
                     <<"timing_status="<<(fps>0?"host_receive_average":"insufficient_frames_unverified")<<"\n";
+                summary << "aps_exposure_actual_us=unknown\naps_gain_actual=unknown\naps_dgain_actual=unknown\n"
+                        << "aps_exposure_actual_status=unverified\naps_ae_requested=manual\naps_ae_readback=unknown\n"
+                        << "aps_gain_units=sdk_float_encoding_unverified\n"
+                        << "aps_exposure_readback_source=ISP_configuration_after_set_not_sensor_measurement\n";
+                if(exposure.requested_us>0) {
+                    summary << std::setprecision(17)
+                        << "aps_exposure_requested_us=" << exposure.requested_us
+                        << "\naps_gain_requested=" << exposure.requested_again
+                        << "\naps_dgain_requested=" << exposure.requested_dgain
+                        << "\naps_exposure_submitted_seconds=" << exposure.submitted_seconds
+                        << "\naps_gain_submitted=" << exposure.submitted_again
+                        << "\naps_dgain_submitted=" << exposure.submitted_dgain
+                        << "\naps_ispgain_submitted=" << exposure.submitted_ispgain << '\n';
+                }
+                summary << "aps_exposure_set_accepted=" << exposure.set_accepted << '\n'
+                        << "aps_exposure_readback_available=" << exposure.readback_available << '\n';
+                if(exposure.readback_available) {
+                    summary << std::setprecision(17)
+                        << "aps_exposure_readback_seconds=" << exposure.readback_seconds
+                        << "\naps_gain_readback=" << exposure.readback_again
+                        << "\naps_dgain_readback=" << exposure.readback_dgain
+                        << "\naps_ispgain_readback=" << exposure.readback_ispgain << '\n';
+                }
                 if(!summary) throw std::runtime_error("summary write failed");
             }
             std::cout<<"Recording finalized: "<<path<<" APS="<<frames<<" measured FPS="<<fps<<"\n";
@@ -115,6 +140,6 @@ private:
     }
     std::mutex m; std::condition_variable cv; std::deque<Item> q;
     size_t bytes=0; bool accepting=false,session=false,quitting=false;
-    std::string directory,error; std::thread worker;
+    std::string directory,error; const x5_exposure_state exposure; std::thread worker;
 };
 }

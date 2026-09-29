@@ -71,7 +71,7 @@ int runNativeLive(int argc,char** argv) {
         if(k=="--help" || k=="-h") {
             std::cout<<"Native X5 EVS VC0 + APS VC1 offline ISP\n"
                 <<"--profile 0..5 --aps-exposure-us 5100 --aps-gain 1 --aps-dgain 1 --aps-ae manual\n"
-                <<"Exposure/gains are initialization-only; API/readback are not frame measurements.\n"
+                <<"Exposure is microseconds; gains pass through SDK float fields (encoding/range unverified). Exposure/gains are initialization-only; API/readback are not frame measurements.\n"
                 <<"--sync-tolerance-ms 25 --sync-wait-ms 40 --aps-correction on|off --aps-wb off|manual|once|continuous\n"
                 <<"--aps-config JSON (existing WB fields; RAW black/gamma not reapplied to ISP output)\n"
                 <<"--no-display --seconds 10 --record --output NEW_SESSION_PREFIX --preview-width 1152\n"
@@ -111,12 +111,15 @@ int runNativeLive(int argc,char** argv) {
     const cv::Size previewSize(o.previewWidth,int(std::lround(o.previewWidth*608.0/1536.0)));
     std::cout<<"preview_layout=whole_pair_v2 canvas="<<previewSize.width<<'x'<<previewSize.height
              <<" window=AUTOSIZE (independent of exposure/gain)\n";
+    std::cout<<"capture_control_revision=aps-control-audit-v1 built="<<__DATE__<<" "<<__TIME__<<std::endl;
     x5_capture* backend=nullptr;
     int ret=x5_open(&backend,o.profile,o.exposure,o.again,o.dgain);
     if(ret || !backend) throw std::runtime_error("Native pipeline initialization failed: "+std::to_string(ret));
     struct BackendGuard {x5_capture* p; ~BackendGuard(){x5_close(p);}} backendGuard{backend};
     FrameSync<Shimeta::Frame> sync(int64_t(o.toleranceMs*1e6),int64_t(o.waitMs*1e6));
-    NativeRecorder recorder;
+    x5_exposure_state exposureState{};
+    if(x5_get_exposure_state(backend,&exposureState)) throw std::runtime_error("Exposure snapshot unavailable");
+    NativeRecorder recorder(exposureState);
     if(o.record) recorder.start(o.output);
     std::atomic<bool> stop{false}; CaptureStats stats[2];
     std::mutex errorMutex; std::string captureError;

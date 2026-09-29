@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """HVS / RDK-X5: build, record, graceful stop, playback, CSV/NPZ export and diagnosis."""
 import argparse
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -78,6 +79,19 @@ def runtime_env(vin_bypass=False):
         paths.append(env['LD_LIBRARY_PATH'])
     env['LD_LIBRARY_PATH'] = ':'.join(paths)
     return env
+
+def print_exposure_summary(summary):
+    """Old recordings keep missing values unknown; never substitute requests."""
+    for label, keys in (
+        ('REQUEST', ('aps_exposure_requested_us', 'aps_gain_requested', 'aps_dgain_requested')),
+        ('SUBMIT', ('aps_exposure_submitted_seconds', 'aps_gain_submitted', 'aps_dgain_submitted')),
+        ('SDK READBACK (configuration only)', ('aps_exposure_readback_seconds', 'aps_gain_readback', 'aps_dgain_readback')),
+        ('SENSOR ACTUAL', ('aps_exposure_actual_us', 'aps_gain_actual', 'aps_dgain_actual')),
+    ):
+        print('Exposure ' + label + ': ' + ', '.join(f'{key}={summary.get(key, "unknown")}' for key in keys), flush=True)
+    print('Gain units:', summary.get('aps_gain_units', 'unknown'),
+          '; AE readback:', summary.get('aps_ae_readback', 'unknown'), flush=True)
+
 
 def read_summary(folder):
     path = folder / 'summary.txt'
@@ -201,6 +215,12 @@ def main(argv=None):
             raise RuntimeError('Build first with --with-native-live; native live never uses VIN bypass.')
         binary = executable(build, 'hv_sample_live_record_display', 'live_record_display')
         options = args.live_args[1:] if args.live_args[:1] == ['--'] else args.live_args
+        with binary.open('rb') as stream:
+            digest = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+        print(f'Native executable: {binary.resolve()} sha256={digest.hexdigest()}', flush=True)
+        print('Native arguments:', options, flush=True)
         os.execve(str(binary), [str(binary), *options], runtime_env())
     if args.command == 'diagnose':
         print('Platform:', platform.platform(), platform.machine())
@@ -272,6 +292,7 @@ def main(argv=None):
                 raise RuntimeError('Bayer replay requires preserved Gray8 APS frames; this session contains NV12 or mixed frames. '
                                    'Replay with --aps-bayer none (scripts/play.sh no longer forces gbrg).')
             print('Bayer reconstruction uses original Y samples; CFA pattern and color calibration must be verified.', flush=True)
+        print_exposure_summary(summary)
         player = executable(build, 'hv_sample_player', 'player')
         command = [player, folder / 'events.raw', folder / 'aps.avi', '30', str(args.speed)]
         if args.aps_bayer != 'none':
