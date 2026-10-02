@@ -19,6 +19,7 @@ public:
     struct Header {
         uint64_t bytes, hostNs, getNs, copyNs;
         uint32_t stream, width, height, stride, frameId, format;
+        uint64_t vinTimestamp=0, vinTvUs=0;
     };
     explicit MemoryArena(size_t capacity): capacity_(capacity), data_(new uint8_t[capacity]()) {}
     static size_t extent(size_t bytes) {

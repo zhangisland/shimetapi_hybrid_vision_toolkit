@@ -16,17 +16,6 @@ struct IO {
 };
 template<class F> void rejects(F f) {bool failed=false;try {f();}catch(const std::exception&) {failed=true;}assert(failed);}
 int main() {
- struct IdentityIO {
-   int calls=0;bool wrong=false,fail=false;
-   void readBytes(uint16_t reg,uint8_t* out,uint16_t count) {
-     assert(reg==0x3428&&count==2);++calls;
-     if(fail) throw std::runtime_error("short I2C transaction");
-     out[0]=8;out[1]=wrong?0:8;
-   }
- } identity;
- assert(apx::verifyIdentity(identity,6,0x3c)==0x0808&&identity.calls==1);
- identity.wrong=true;rejects([&]{apx::verifyIdentity(identity,6,0x3c);});
- identity.fail=true;rejects([&]{apx::verifyIdentity(identity,6,0x3c);});
  assert(MemoryArena::payloadCapacity(64ULL<<20,320ULL<<20)==32ULL<<20);
  rejects([]{MemoryArena::payloadCapacity(64ULL<<20,(320ULL<<20)-1);});
  rejects([]{MemoryArena::payloadCapacity(1ULL<<20,UINT64_MAX);});

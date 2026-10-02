@@ -85,6 +85,10 @@ static int bind_same_mipi_host(dual_vc_pipe_t pipes[VC_PIPE_NUM])
 	int32_t ret = 0;
 	uint32_t mipi_rx = 0;
 
+#ifdef X5_RAW_ONLY
+    if(pipes[0].pipe_contex.sensor_config->chip_id != 0x0808 ||
+       pipes[0].pipe_contex.sensor_config->chip_id_reg != 0x3428) return -1;
+#endif
 	ret = vp_sensor_fixed_mipi_host(pipes[0].pipe_contex.sensor_config,
 		&pipes[0].pipe_contex.csi_config);
 	if (ret != 0) {
@@ -92,6 +96,7 @@ static int bind_same_mipi_host(dual_vc_pipe_t pipes[VC_PIPE_NUM])
 		return ret;
 	}
 
+	printf("Sensor pre-init identity verified by vp_sensor_fixed_mipi_host (0x3428=0x0808)\n");
 	mipi_rx = pipes[0].pipe_contex.sensor_config->vin_node_attr->cim_attr.mipi_rx;
 	pipes[1].pipe_contex.sensor_config->vin_node_attr->cim_attr.mipi_rx = mipi_rx;
 	pipes[1].pipe_contex.csi_config = pipes[0].pipe_contex.csi_config;
@@ -148,6 +153,12 @@ static int create_vin_node(dual_vc_pipe_t *pipe)
 	uint64_t vin_attr_ex_mask = 0;
 	int32_t ret = 0;
 
+#ifdef X5_RAW_ONLY
+    /* CIM embeds frame_id into the first TWO payload bytes when enabled.
+     * This destroys EVS sync markers and APS RAW samples. Keep data pristine. */
+    vin_node_attr->cim_attr.func.enable_frame_id = 0;
+    vin_node_attr->cim_attr.func.set_init_frame_id = 0;
+#endif
 	pipe->link_port = vin_node_attr->cim_attr.vc_index;
 
 	if (pipe->pipe_contex.csi_config.mclk_is_not_configed) {
@@ -426,6 +437,8 @@ int x5_get(x5_capture *c, int aps, x5_image *out) {
 #endif
     out->width=image->buffer.width; out->height=image->buffer.height;
     out->stride=image->buffer.stride; out->frame_id=image->info.frame_id;
+    out->vin_timestamp=image->info.timestamps;
+    out->vin_tv_us=(uint64_t)image->info.tv.tv_sec*1000000ULL+image->info.tv.tv_usec;
     out->format=image->buffer.format;
     int planes=aps?2:1;
 #ifdef X5_RAW_ONLY

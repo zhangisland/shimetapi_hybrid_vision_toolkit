@@ -18,6 +18,8 @@
 export LD_LIBRARY_PATH=/app/shimetapi_hybrid_vision_toolkit/lib/x5${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 ```
 
+python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/bright_100_fixed --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
 
 ## HVS相关的源代码编译
 ```bash

@@ -24,9 +24,9 @@ int main(int argc,char** argv) {
     std::filesystem::create_directory(temp);
     {
         std::ofstream meta(temp/"vin.frames.jsonl");
-        meta<<"{\"stream\":\"evs\",\"host_ns\":9000031000000}\n"
+        meta<<"{\"stream\":\"evs\",\"frame_id\":29,\"host_ns\":9000031000000}\n"
             <<"{\"stream\":\"aps\",\"host_ns\":9000032000000}\n"
-            <<"{\"stream\":\"evs\",\"host_ns\":9000063000000}\n"
+            <<"{\"stream\":\"evs\",\"frame_id\":30,\"host_ns\":9000063000000}\n"
             <<"{\"stream\":\"aps\",\"host_ns\":9000065000000}\n";
     }
     ReplayTimeline timeline;assert(timeline.load((temp/"aps.avi").string(),evsSequence.packetEnds(),2));
@@ -35,11 +35,35 @@ int main(int argc,char** argv) {
     assert(timeline.elapsed(1,30)==33000);
     assert(timeline.index(32999,30)==0&&timeline.index(33000,30)==1);
     assert(evsSequence.frameIndexForTimestamp(timeline.time(0,30),EvsStepMode::Single)==8);
+    ReplayTimeline rate;
+    assert(rate.load((temp/"aps.avi").string(),{12031000,12056600},2));
+    assert(std::abs(rate.sensorUnitsPerHostUs-0.8)<1e-9);
+    assert(rate.time(0,30)==12031800&&rate.elapsed(1,30)==33000);
+    assert(rate.index(33000,30)==1);
+    EvsFrameSequence legacy;assert(legacy.open((temp/"synthetic").string()));
+    assert(legacy.frameCount()==16&&legacy.processedTimestampAt(0)==12000000);
     bool rejected=false;
     try {timeline.load((temp/"aps.avi").string(),evsSequence.packetEnds(),3);}
     catch(const std::exception&) {rejected=true;}
     assert(rejected);
     std::filesystem::remove(temp/"vin.frames.jsonl");std::filesystem::remove(temp);
+    {
+        fake_player::delayMs=0;
+        ApsFrameCache prepared;assert(prepared.open("fake",30,true));
+        cv::Mat f;uint64_t actual=0;Shimeta::EvsTimestamp ts{};
+        auto until=Clock::now()+std::chrono::seconds(5);
+        while(!prepared.frameAt(23,f,&actual,&ts)||actual!=23) {
+            assert(prepared.error().empty()&&Clock::now()<until);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        assert(prepared.preparedFrames()==24&&ts.processed_timestamp==1023);
+        const auto reads=fake_player::reads.load();
+        while(!prepared.frameAt(2,f,&actual,&ts)||actual!=2) {
+            assert(Clock::now()<until);std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        assert(ts.processed_timestamp==1002&&fake_player::reads==reads);
+    }
+    fake_player::delayMs=30;
     ApsFrameCache cache;assert(cache.open("fake",30));
     cv::Mat frame;uint64_t actual=0;
     const auto begin=Clock::now();
