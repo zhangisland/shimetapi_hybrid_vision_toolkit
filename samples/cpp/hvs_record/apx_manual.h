@@ -7,20 +7,8 @@
 #include <sstream>
 
 namespace apx {
-// Match vp_sensors.c: reg16/data16 is ONE repeated-start read, not two
-// independent reg16/data8 accesses. Exposure registers still use data8.
-template<class IO> uint16_t verifyIdentity(IO& io, int bus, int address) {
- uint8_t bytes[2]{};
- io.readBytes(0x3428,bytes,2);
- const auto id=uint16_t((uint16_t(bytes[0])<<8)|bytes[1]);
- if(id!=0x0808) {
-   std::ostringstream msg;
-   msg<<"APX003CC chip identity mismatch: bus="<<bus<<" addr=0x"<<std::hex<<address
-      <<" reg=0x3428 reg16/data16 read=0x"<<id<<" expected=0x0808; no exposure writes performed";
-   throw std::runtime_error(msg.str());
- }
- return id;
-}
+// Identity is checked by vp_sensor_fixed_mipi_host BEFORE sensor init.
+// 0x3428 changes after init on the tested X5; do not assert 0x0808 in-stream.
 // The supplied guide contains 146 rows, not 161. Restrict to the internally
 // consistent analog segment 0..64; do not invent the contradictory digital LUT.
 inline constexpr uint8_t analog[] = {
@@ -54,7 +42,11 @@ template<class IO> Registers apply(IO& io,int lines,double gain) {
  }
  for(auto r:regs) io.write(r.first,r.second);
  if(!regs.empty()) for(auto v:{0,1,0}) io.write(0x342c,uint8_t(v));
- for(auto r:regs) if(io.read(r.first)!=r.second) throw std::runtime_error("APS register readback mismatch");
+ for(auto r:regs) {const auto actual=io.read(r.first);if(actual!=r.second) {
+   std::ostringstream msg;msg<<"APS register readback mismatch: reg=0x"<<std::hex<<r.first<<" requested=0x"<<unsigned(r.second)<<" read=0x"<<unsigned(actual);
+   if(r.first==0x015a||r.first==0x015b) msg<<"; documented exposure registers do not retain writes in this mode; exposure was NOT verified";
+   throw std::runtime_error(msg.str());
+ }}
  return regs;
 }
 template<class IO> void verify(IO& io,const Registers& regs) {

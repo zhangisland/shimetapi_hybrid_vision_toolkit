@@ -22,6 +22,7 @@
 #include <map>
 #include <condition_variable>
 #include <thread>
+#include <cstdio>
 
 #include <opencv2/opencv.hpp>
 
@@ -101,7 +102,9 @@ public:
     DecodeStats decodeStats() const {std::lock_guard<std::mutex> lock(mutex_);return stats_;}
     ~ApsFrameCache();
     void setIsp(const ApsIsp& isp) { isp_=isp; reader_.setIsp(isp); }
-    bool open(const std::string& path, double fallback_fps);
+    bool open(const std::string& path, double fallback_fps, bool prepare=false);
+    uint64_t preparedFrames() const {std::lock_guard<std::mutex> lock(mutex_);return prepared_;}
+    std::string error() const {std::lock_guard<std::mutex> lock(mutex_);return error_;}
     double fps() const;
     size_t frameCount() const;
     bool frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index = nullptr,
@@ -123,6 +126,14 @@ private:
     double fps_=30;
     bool pending_=false, quitting_=false, exhausted_=false;
     DecodeStats stats_;
+    bool prepare_=false;
+    uint64_t prepared_=0;
+    std::string error_;
+    std::FILE* preview_=nullptr;
+    struct PreviewEntry {uint64_t offset;int rows,cols;Shimeta::EvsTimestamp timestamp;};
+    std::vector<PreviewEntry> previewEntries_;
+    std::vector<cv::Mat> previewMemory_;
+    bool memoryPreview_=false;
 };
 
 /**

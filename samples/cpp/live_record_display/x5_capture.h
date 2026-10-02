@@ -21,6 +21,7 @@ typedef struct {
     void *lease;
     int format; /* actual hbn buffer format; raw recorder preserves all bytes */
     uint64_t wait_ns, cache_ns;
+    uint64_t vin_timestamp, vin_tv_us;
 } x5_image;
 /* Configuration is initialization-only. AE auto is deliberately unavailable for
  * this HVS sensor_mode=2 profile (official sample reports nonconvergence). */

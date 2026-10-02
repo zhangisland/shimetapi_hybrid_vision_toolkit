@@ -67,6 +67,7 @@ static void installSignalHandlers() {
 
 int main(int argc, char** argv) {
     installSignalHandlers();
+    cv::setNumThreads(2);
     if (argc < 3) { printUsage(argv[0]); return 1; }
 
     std::string raw_path = argv[1];
@@ -108,7 +109,7 @@ int main(int argc, char** argv) {
     // ---- 加载 APS ----
     ApsFrameCache video_cache;
     video_cache.setIsp(isp);
-    if (!video_cache.open(avi_path, fallback_fps)) {
+    if (!video_cache.open(avi_path, fallback_fps,isp.pattern!="none")) {
         std::cerr << "Failed to open AVI: " << avi_path << std::endl;
         return 1;
     }
@@ -119,7 +120,7 @@ int main(int argc, char** argv) {
     try {timeline.load(avi_path,evs_seq.packetEnds(),video_cache.frameCount());}
     catch(const std::exception& e) {std::cerr<<e.what()<<std::endl;return 1;}
     if(timeline.host) std::cout<<"SYNC: host receive approximation; offset="<<timeline.offsetUs
-        <<" us, offset spread="<<timeline.offsetSpreadUs<<" us. Not per-frame sensor sync.\n";
+        <<" us, sensor-units/host-us="<<timeline.sensorUnitsPerHostUs<<", residual spread="<<timeline.offsetSpreadUs<<" us. Not per-frame sensor sync.\n";
     auto img_size = evs_seq.imageSize();
     std::cout << "EVS raw: " << raw_path << " (" << img_size.first << "x" << img_size.second << ")\n";
     std::cout << "APS AVI: " << avi_path << ", fps=" << video_cache.fps() << "\n";
@@ -153,7 +154,7 @@ int main(int argc, char** argv) {
     auto resetClocks=[&] {
         const auto now=Clock::now();
         apsStart=now-std::chrono::microseconds(int64_t(timeline.elapsed(aps_frame_index,video_cache.fps())/speed));
-        evsStart=now-std::chrono::microseconds(int64_t((evs_seq.processedTimestampAt(evs_frame_index)-evs_seq.processedTimestampAt(0))/speed));
+        evsStart=now-std::chrono::microseconds(int64_t((evs_seq.processedTimestampAt(evs_frame_index)-evs_seq.processedTimestampAt(0))/(speed*timeline.sensorUnitsPerHostUs)));
     };
     Shimeta::EvsTimestamp displayedTimestamp{};
     auto sensorForAps=[&](uint64_t index) {
@@ -167,7 +168,16 @@ int main(int argc, char** argv) {
     };
     using PaintState=std::tuple<uint64_t,uint64_t,bool,bool,bool,int,int,double>;
     PaintState painted{};bool havePaint=false;
+    uint64_t previousPrepared=UINT64_MAX;
     while(g_running) {
+        if(!video_cache.error().empty()) {std::cerr<<video_cache.error()<<std::endl;return 1;}
+        if(!ready&&video_cache.preparedFrames()!=previousPrepared) {
+            previousPrepared=video_cache.preparedFrames();
+            auto progress=composeSideBySide(evs_seq.frameAt(0,evs_color_mode),last_video_frame,0,
+                "prepare "+std::to_string(previousPrepared)+"/"+std::to_string(video_cache.frameCount()),
+                0,0,0,video_cache.frameCount(),evs_seq.frameCount(),evs_step_mode,evs_color_mode,true,speed,false,false);
+            cv::imshow(win_name,fitPlayerCanvas(progress,window_width,window_height));
+        }
         UiAction action=UiAction(g_pending_action.exchange(int(UiAction::None)));
         if(action==UiAction::SyncOn||action==UiAction::SyncOff) {
             sync_enabled=action==UiAction::SyncOn;aps_frame_index=displayed_aps_index;
@@ -213,7 +223,7 @@ int main(int argc, char** argv) {
         }
         if(ready&&evs_playing&&!sync_enabled) {
             const auto us=std::chrono::duration_cast<std::chrono::microseconds>(now-evsStart).count();
-            const auto target=evs_seq.processedTimestampAt(0)+uint64_t(std::max(0.0,double(us)*speed));
+            const auto target=evs_seq.processedTimestampAt(0)+uint64_t(std::max(0.0,double(us)*speed*timeline.sensorUnitsPerHostUs));
             evs_frame_index=evs_seq.frameIndexForTimestamp(target,EvsStepMode::Single);
             if(target>=evs_seq.processedTimestampAt(evs_seq.frameCount()-1)) evs_playing=false;
         }
@@ -245,13 +255,13 @@ int main(int argc, char** argv) {
             const auto paintStart=Clock::now();
             // Accumulate a TIME window, not eight nonempty event frames.
             const auto begin=evs_seq.processedTimestampAt(evs_frame_index);
-            const auto end=begin+uint64_t(1e6/video_cache.fps());
+            const auto end=begin+uint64_t(1e6*timeline.sensorUnitsPerHostUs/video_cache.fps());
             size_t count=1;
             if(evs_step_mode==EvsStepMode::Aps) while(evs_frame_index+count<evs_seq.frameCount()&&
                 evs_seq.processedTimestampAt(evs_frame_index+count)<end) ++count;
             const auto evs=evs_seq.accumulatedFrameAt(evs_frame_index,count,evs_color_mode);
-            cv::imshow(win_name,fitPlayerCanvas(composeSideBySide(evs,last_video_frame,apsTs,source,
-                displayed_aps_index,begin,evs_frame_index,video_cache.frameCount(),evs_seq.frameCount(),
+            cv::imshow(win_name,fitPlayerCanvas(composeSideBySide(evs,last_video_frame,timeline.host?timeline.elapsed(displayed_aps_index,video_cache.fps()):apsTs,source,
+                displayed_aps_index,timeline.host?uint64_t(std::max(0.0,(double(begin)-double(timeline.aps.front()))/timeline.sensorUnitsPerHostUs)):begin,evs_frame_index,video_cache.frameCount(),evs_seq.frameCount(),
                 evs_step_mode,evs_color_mode,sync_enabled,speed,evs_playing,aps_playing),window_width,window_height));
             maxPresentMs=std::max(maxPresentMs,std::chrono::duration<double,std::milli>(Clock::now()-paintStart).count());
             painted=state;havePaint=true;
@@ -261,7 +271,7 @@ int main(int argc, char** argv) {
             const auto decode=video_cache.decodeStats();
             std::cout<<"Replay presented APS="<<shown<<" ("<<shown/elapsed<<"/s), skipped previews="<<skipped
                 <<", max compose+imshow ms="<<maxPresentMs
-                <<", cumulative raw-read+ISP mean/max ms="<<(decode.frames?decode.totalMs/decode.frames:0)<<'/'<<decode.maxMs
+                <<", cumulative preview-fetch mean/max ms="<<(decode.frames?decode.totalMs/decode.frames:0)<<'/'<<decode.maxMs
                 <<"; capture data unchanged\n";
             shown=skipped=0;maxPresentMs=0;reportStart=Clock::now();
         }

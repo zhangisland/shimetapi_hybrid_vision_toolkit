@@ -124,6 +124,7 @@ struct Stats {
  uint64_t first=0,bytes=0,warmup=0,errors=0,gaps=0,duplicates=0,resets=0,overflow=0;
  uint64_t getNs=0,waitNs=0,cacheNs=0,copyNs=0,releaseNs=0,workMax=0,intervalMax=0;
  uint32_t previous=0;
+ uint64_t unavailableIds=0,vinFirst=0,vinLast=0,vinTimestampRepeats=0,vinTimestampMissing=0;
  int lastError=0;
  void received(const x5_image& im,uint64_t now) {
    const auto count=frames.load();
@@ -131,10 +132,17 @@ struct Stats {
    else {
      intervalMax=std::max(intervalMax,now-last.load());
      const uint32_t delta=uint32_t(im.frame_id)-previous;
-     if(delta==0) ++duplicates;
+     if(!im.frame_id||!previous) {}
+     else if(delta==0) ++duplicates;
      else if(delta<0x80000000U) gaps+=delta-1;
      else ++resets;
    }
+   if(!im.frame_id) ++unavailableIds;
+   if(im.vin_tv_us) {
+     if(!vinFirst) vinFirst=im.vin_tv_us;
+     if(vinLast==im.vin_tv_us) ++vinTimestampRepeats;
+     vinLast=im.vin_tv_us;
+   } else ++vinTimestampMissing;
    previous=uint32_t(im.frame_id);last=now;bytes+=im.size[0];++frames;
  }
  double fps() const {return frames>1&&last>first?double(frames-1)*1e9/double(last-first):0;}
@@ -146,6 +154,9 @@ static void statsOut(std::ostream& out,const char* prefix,const Stats& s,double 
     <<prefix<<"_warmup_received="<<s.warmup<<'\n'<<prefix<<"_get_errors_or_timeouts="<<s.errors<<'\n'
     <<prefix<<"_last_get_error="<<s.lastError<<'\n'
     <<prefix<<"_frame_id_gaps="<<s.gaps<<'\n'<<prefix<<"_duplicate_ids="<<s.duplicates<<'\n'
+    <<prefix<<"_unavailable_ids="<<s.unavailableIds<<'\n'
+    <<prefix<<"_vin_tv_first_us="<<s.vinFirst<<'\n'<<prefix<<"_vin_tv_last_us="<<s.vinLast<<'\n'
+    <<prefix<<"_vin_tv_repeats="<<s.vinTimestampRepeats<<'\n'<<prefix<<"_vin_tv_missing="<<s.vinTimestampMissing<<'\n'
     <<prefix<<"_id_resets="<<s.resets<<'\n'<<prefix<<"_capacity_rejected="<<s.overflow<<'\n'
     <<prefix<<"_get_including_wait_cache_ns="<<s.getNs<<'\n'<<prefix<<"_copy_reservation_ns="<<s.copyNs<<'\n'
     <<prefix<<"_VIN_wait_ns="<<s.waitNs<<'\n'<<prefix<<"_cache_invalidation_ns="<<s.cacheNs<<'\n'
@@ -202,6 +213,7 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
    if(!writer.writeFrame(f,nullptr)) throw std::runtime_error("Compatibility write failed");
    const auto verify=ns(); const auto hash=hashBytes(bytes,h.bytes);const auto hashNs=ns()-verify;verifyNs+=hashNs;
    meta<<"{\"stream\":\""<<(h.stream?"aps":"evs")<<"\",\"offset\":"<<(h.stream?offset:evsOffset)
+       <<",\"vin_timestamp\":"<<h.vinTimestamp<<",\"vin_tv_us\":"<<h.vinTvUs
        <<",\"bytes\":"<<h.bytes<<",\"host_ns\":"<<h.hostNs<<",\"frame_id\":"<<h.frameId
        <<",\"width\":"<<h.width<<",\"height\":"<<h.height<<",\"stride\":"<<h.stride
        <<",\"format\":"<<h.format<<",\"fnv1a64\":\""<<std::hex<<hash<<std::dec
@@ -296,13 +308,14 @@ static int run(const Options& o) {
  if(x5_raw_identity(camera,&addr,&mode,&index,&configuredBus)||addr!=o.address||mode!=2||index!=240) throw std::runtime_error("Unexpected sensor identity/config; manual control and RAW layout not audited for this mode");
  std::unique_ptr<SensorIO> sensor;
  apx::Registers regs;
- int vts=-1;
+ int vts=-1,postInitStatus=-1;
  if(o.lines||o.gain>=0) {
    if(configuredBus<0||o.bus!=configuredBus) throw std::runtime_error("Requested I2C bus differs from selected VIN vcon device-tree bus, or bus is unavailable");
    sensor=std::make_unique<SensorIO>(o.bus,o.address);
    // The exact pair's vp_sensors chip_id is 0x0808 at 0x3428.
-   const auto chipId=apx::verifyIdentity(*sensor,o.bus,o.address);
-   std::cout<<"APX003CC identity reg16/data16: 0x"<<std::hex<<chipId<<std::dec<<std::endl;
+   uint8_t initializedId[2]{};sensor->readBytes(0x3428,initializedId,2);
+   const auto chipId=(uint16_t(initializedId[0])<<8)|initializedId[1];postInitStatus=chipId;
+   std::cout<<"APX003CC post-init 0x3428 snapshot (identity verified BEFORE init): 0x"<<std::hex<<chipId<<std::dec<<std::endl;
    vts=(int(sensor->read(0x0160))<<8)|sensor->read(0x0161);
    regs=apx::apply(*sensor,o.lines,o.gain);
    std::cout<<"APS control after both streams started: lines="<<o.lines<<" gain_dB="<<(o.gain>=0?apx::gainIndex(o.gain)*0.375:-1)<<" VTS="<<vts<<" registers verified; NOT per-frame exposure\n";
@@ -326,7 +339,7 @@ static int run(const Options& o) {
        else if(received<end&&!stop.load()) {
          s.getNs+=received-getBegin;s.waitNs+=im.wait_ns;s.cacheNs+=im.cache_ns;s.received(im,received);
          if(o.diagnostic!="receive") {
-           MemoryArena::Header h{im.size[0],received,received-getBegin,0,uint32_t(stream),uint32_t(im.width),uint32_t(im.height),uint32_t(im.stride),uint32_t(im.frame_id),uint32_t(im.format)};
+           MemoryArena::Header h{im.size[0],received,received-getBegin,0,uint32_t(stream),uint32_t(im.width),uint32_t(im.height),uint32_t(im.stride),uint32_t(im.frame_id),uint32_t(im.format),im.vin_timestamp,im.vin_tv_us};
            const auto copy=ns();
            if(!arena.append(h,im.plane[0])) {++s.overflow;full=true;stop=true;}
            s.copyNs+=ns()-copy;
@@ -379,6 +392,7 @@ static int run(const Options& o) {
    <<"\naps_line_time_us_user_verified="<<o.lineUs<<"\naps_gain_requested_db="<<o.gain
    <<"\naps_gain_submitted_db="<<(o.gain>=0?apx::gainIndex(o.gain)*0.375:-1)
    <<"\naps_sdk_exposure_readback=unavailable_direct_register_control\naps_frame_exposure=unavailable"
+   <<"\nidentity_check=official_preinit_probe_0x0808\npost_init_3428_snapshot="<<postInitStatus
    <<"\naps_control_bus="<<o.bus<<"\naps_configured_bus="<<configuredBus<<"\naps_control_address="<<o.address<<"\nvts_readback="<<vts<<'\n';
  for(auto r:regs) report<<"aps_register_0x"<<std::hex<<r.first<<"=0x"<<unsigned(r.second)<<std::dec<<'\n';
  report<<"aps_register_verification="<<(regs.empty()?"not_requested":error.empty()?"matched_after_set_periodic_and_before_stop":"see_reason")<<'\n';

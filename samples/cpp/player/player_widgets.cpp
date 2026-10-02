@@ -4,6 +4,7 @@
  *        详见 player_widgets.h。所有符号位于命名空间 hv_player。
  */
 #include "player_widgets.h"
+#include "replay_timeline.h"
 
 #include <shimetapi/codec/mipi_raw8_codec.h>
 
@@ -68,8 +69,9 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
 // ============================================================================
 // ApsFrameCache
 // ============================================================================
-bool ApsFrameCache::open(const std::string& path, double fallback_fps) {
+bool ApsFrameCache::open(const std::string& path, double fallback_fps,bool prepare) {
     shutdown();frames_.clear();stats_={};path_=path;quitting_=false;exhausted_=false;
+    prepare_=prepare;prepared_=0;error_.clear();previewEntries_.clear();previewMemory_.clear();memoryPreview_=false;
     if(!reader_.open(path,fallback_fps)) return false;
     fps_=reader_.fps();total_=reader_.totalFrameCount();requested_=0;pending_=true;
     worker_=std::thread(&ApsFrameCache::decodeLoop,this);
@@ -79,9 +81,44 @@ ApsFrameCache::~ApsFrameCache() {shutdown();}
 void ApsFrameCache::shutdown() {
     {std::lock_guard<std::mutex> lock(mutex_);quitting_=true;}
     wake_.notify_all();if(worker_.joinable()) worker_.join();
+    if(preview_) {std::fclose(preview_);preview_=nullptr;}
 }
 void ApsFrameCache::decodeLoop() {
     uint64_t next=0;
+    if(prepare_) {
+        try {
+            preview_=std::tmpfile();
+            if(!preview_) throw std::runtime_error("Cannot create temporary BGR playback cache");
+            uint64_t offset=0;
+            const auto started=std::chrono::steady_clock::now();
+            for(uint64_t i=0;i<total_;++i) {
+                {std::lock_guard<std::mutex> lock(mutex_);if(quitting_) return;}
+                cv::Mat frame;Shimeta::EvsTimestamp timestamp{};
+                if(!reader_.readFrameAt(i,frame,&timestamp)) throw std::runtime_error("Cannot prepare APS frame "+std::to_string(i));
+                const uint64_t bytes=frame.total()*frame.elemSize();
+                if(!i) {
+                    uint64_t availableRam=UINT64_MAX;
+#ifdef __linux__
+                    availableRam=0;std::ifstream mem("/proc/meminfo");std::string key,rest;uint64_t kib=0;
+                    while(mem>>key>>kib) {std::getline(mem,rest);if(key=="MemAvailable:") {availableRam=kib*1024;break;}}
+#endif
+                    memoryPreview_=bytes*total_<=(1024ULL<<20)&&availableRam>bytes*total_+(512ULL<<20);
+                    const auto available=std::filesystem::space(std::filesystem::temp_directory_path()).available;
+                    if(!memoryPreview_&&(bytes*total_>(8ULL<<30)||available<bytes*total_+(128ULL<<20)))
+                        throw std::runtime_error("BGR preview cache exceeds 8 GiB or available temporary disk space; use grayscale playback or a shorter recording");
+                }
+                if(!frame.isContinuous()||(!memoryPreview_&&std::fwrite(frame.data,1,size_t(bytes),preview_)!=bytes))
+                    throw std::runtime_error("Temporary BGR cache write failed; original recordings unchanged");
+                previewEntries_.push_back({offset,frame.rows,frame.cols,timestamp});offset+=bytes;
+                if(memoryPreview_) previewMemory_.push_back(std::move(frame));
+                {std::lock_guard<std::mutex> lock(mutex_);prepared_=i+1;}
+                if(i%10==0||i+1==total_) std::cout<<"Preparing existing ISP for smooth playback: "<<i+1<<'/'<<total_<<std::endl;
+            }
+            if(std::fflush(preview_)) throw std::runtime_error("Preview cache flush failed");
+            std::cout<<"APS preparation seconds="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()
+                     <<" prepared BGR storage="<<(memoryPreview_?"memory":"temporary file")<<" bytes="<<offset<<"; starting playback clock AFTER preparation"<<std::endl;
+        } catch(const std::exception& e) {std::lock_guard<std::mutex> lock(mutex_);error_=e.what();return;}
+    }
     for(;;) {
         bool rewind=false;uint64_t target=0;
         {
@@ -89,7 +126,7 @@ void ApsFrameCache::decodeLoop() {
             wake_.wait(lock,[&]{return quitting_||pending_;});
             if(quitting_) return;
             if(frames_.count(requested_)) {pending_=false;continue;}
-            target=requested_;rewind=target<next;
+            target=requested_;rewind=!prepare_&&target<next;
             if(rewind) {frames_.clear();exhausted_=false;next=0;}
             if(exhausted_) {pending_=false;continue;}
         }
@@ -99,7 +136,20 @@ void ApsFrameCache::decodeLoop() {
             if(rewind) {reader_.setIsp(isp_);if(!reader_.open(path_,fps_)) throw std::runtime_error("Cannot rewind AVI");}
             // Coalesce pending preview requests. Sequential IO may still read
             // intervening AVI frames, but only target receives ISP processing.
-            ok=reader_.readFrameAt(target,frame,&timestamp);
+            if(prepare_) {
+                const auto& entry=previewEntries_.at(target);
+                if(memoryPreview_) {frame=previewMemory_.at(target);timestamp=entry.timestamp;ok=true;} else {
+#ifdef _WIN32
+                const int seek=_fseeki64(preview_,entry.offset,SEEK_SET);
+#else
+                const int seek=fseeko(preview_,off_t(entry.offset),SEEK_SET);
+#endif
+                if(seek) throw std::runtime_error("Preview cache seek failed");
+                frame.create(entry.rows,entry.cols,CV_8UC3);
+                const size_t bytes=frame.total()*frame.elemSize();
+                ok=std::fread(frame.data,1,bytes,preview_)==bytes;timestamp=entry.timestamp;
+                }
+            } else ok=reader_.readFrameAt(target,frame,&timestamp);
         } catch(const std::exception& e) {std::cerr<<"APS playback decode: "<<e.what()<<std::endl;}
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -150,16 +200,30 @@ bool EvsFrameSequence::open(const std::string& filename) {
     // Group transport subframes, including empty ones. Counting unique EVENT
     // timestamps loses empty subframes and changes both geometry and duration.
     frames_.clear();processed_timestamps_.clear();packet_ends_.clear();
+    std::vector<uint64_t> legacyIds;
+    std::ifstream metadata(std::filesystem::path(filename).parent_path()/"vin.frames.jsonl");
+    std::string metadataLine;
+    while(std::getline(metadata,metadataLine)) if(metadataLine.find("\"evs\"")!=std::string::npos)
+        legacyIds.push_back(ReplayTimeline::field(metadataLine,"frame_id"));
+    size_t repaired=0;
     Shimeta::codec::MipiRaw8Decoder decoder;
     Shimeta::Frame f;size_t packets=0,events=0;
     constexpr size_t subBytes=Shimeta::codec::MipiRaw8Layout::kSubframeBytes;
     while(reader.readEvsPacket(f)) {
         if(f.evs.size%(4*subBytes)) {std::cerr<<"Incomplete EVS transport group\n";return false;}
+        std::vector<uint8_t> restored;
+        const uint8_t* payload=f.evs.data;
+        uint32_t firstHeader=0;std::memcpy(&firstHeader,payload,4);
+        if((firstHeader&0xffffffu)!=0xffffu && packets<legacyIds.size() &&
+           (firstHeader&0xffffffu)==(legacyIds[packets]&0xffffu)) {
+            restored.assign(payload,payload+f.evs.size);
+            restored[0]=restored[1]=0xff;payload=restored.data();++repaired;
+        }
         uint64_t packetEnd=0;
         for(size_t offset=0;offset<f.evs.size;offset+=4*subBytes) {
             uint64_t first=0;
             for(size_t sub=0;sub<4;++sub) {
-                uint64_t word=0;std::memcpy(&word,f.evs.data+offset+sub*subBytes,8);
+                uint64_t word=0;std::memcpy(&word,payload+offset+sub*subBytes,8);
                 if((uint32_t(word)&0xffffffu)!=Shimeta::codec::MipiRaw8Layout::kHeaderMask) {
                     std::cerr<<"Invalid EVS subframe header, packet "<<packets<<"\n";return false;
                 }
@@ -171,7 +235,7 @@ bool EvsFrameSequence::open(const std::string& filename) {
                 std::cerr<<"EVS timestamp reset/wrap: cannot build monotonic replay timeline\n";return false;
             }
             std::vector<Shimeta::EventCD> decoded;
-            decoder.Decode(f.evs.data+offset,4*subBytes,decoded,4);
+            decoder.Decode(payload+offset,4*subBytes,decoded,4);
             cv::Mat frame(height_,width_,CV_8UC1,cv::Scalar(0));
             for(const auto& e:decoded) if(uint32_t(e.x)<width_&&uint32_t(e.y)<height_)
                 frame.at<uint8_t>(int(e.y),int(e.x))=e.polarity?1:2;
@@ -179,6 +243,7 @@ bool EvsFrameSequence::open(const std::string& filename) {
         }
         packet_ends_.push_back(packetEnd);++packets;
     }
+    std::cout<<"Legacy CIM frame-ID headers restored in memory="<<repaired<<" (original files unchanged)\n";
     std::cout<<"EVS packets="<<packets<<" events="<<events<<" (empty subframes retained)\n";
     std::cout << "EVS frames cached: " << frames_.size() << std::endl;
     return !frames_.empty();
@@ -359,13 +424,8 @@ cv::Mat scaleNearest(const cv::Mat& src, int num, int den) {
     if (num <= 0 || den <= 0) return src.clone();
     int ow = std::max(1, (src.cols * num) / den);
     int oh = std::max(1, (src.rows * num) / den);
-    cv::Mat dst(oh, ow, CV_8UC3);
-    for (int y = 0; y < oh; ++y) {
-        int sy = std::min((y * den) / num, src.rows - 1);
-        const cv::Vec3b* sr = src.ptr<cv::Vec3b>(sy);
-        cv::Vec3b* dr = dst.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < ow; ++x) dr[x] = sr[std::min((x * den) / num, src.cols - 1)];
-    }
+    cv::Mat dst;
+    cv::resize(src,dst,cv::Size(ow,oh),0,0,cv::INTER_NEAREST);
     return dst;
 }
 cv::Mat scaleDisplayNearest(const cv::Mat& src) { return scaleNearest(src, kDisplayScaleNumerator, kDisplayScaleDenominator); }
@@ -563,7 +623,7 @@ void drawSidebar(cv::Mat& canvas, int x, int height,
     drawPixelText(canvas, left, y - 14, "TIMESTAMPS", accent, 2); y += 50;
     drawBlock("APS timestamp (us)", std::to_string(aps_ts), "source: " + aps_ts_src);
     drawBlock("APS frame", std::to_string(aps_fi), "");
-    drawBlock("EVS timestamp (us)", std::to_string(evs_ts), "source: RAW8 sensor");
+    drawBlock("EVS timestamp (us)", std::to_string(evs_ts), aps_ts_src=="host bridge / approx"?"source: host fit / approx":"source: RAW8 sensor");
     drawBlock("EVS frame", std::to_string(evs_fi), "");
 
     y += 6;
