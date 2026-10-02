@@ -14,6 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+static uint64_t capture_ns(void) {
+    struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+    return (uint64_t)t.tv_sec*1000000000ULL+(uint64_t)t.tv_nsec;
+}
 #define VC_PIPE_NUM 2
 #define APS_ISP_VC_INDEX 1U
 #define ERR_CON_EQ(ret, expected) do { if ((ret)!=(expected)) { fprintf(stderr,"%s:%d SDK error %d\n",__func__,__LINE__,(int)(ret)); return ret; } } while(0)
@@ -25,7 +30,9 @@ typedef struct {
     vp_csi_config_t csi_config;
 } pipe_contex_t;
 typedef struct { pipe_contex_t pipe_contex; int sensor_index; uint32_t link_port; } dual_vc_pipe_t;
-struct x5_capture { dual_vc_pipe_t pipes[2]; int memory_open; x5_exposure_state exposure; };
+struct x5_capture { dual_vc_pipe_t pipes[2]; int memory_open; x5_exposure_state exposure;
+    hbn_vnode_image_t raw_slots[2]; /* one outstanding lease per VC in raw build */
+};
 static int settle = -1;
 static int find_sensor_index_by_config_file(const char *config_file)
 {
@@ -267,6 +274,10 @@ static int create_and_run_vflow(dual_vc_pipe_t *pipe)
 	 * inside create_vin_node(), so it is still 0 here on first entry. */
 	int with_isp = (pipe->pipe_contex.sensor_config->vin_node_attr->cim_attr.vc_index
 		== APS_ISP_VC_INDEX);
+#ifdef X5_RAW_ONLY
+    with_isp = 0;
+    pipe->pipe_contex.sensor_config->vin_node_attr->cim_attr.cim_isp_flyby = 0;
+#endif
 	int32_t ret = 0;
 
 	/* Offline ISP requires VIN to write RAW to DDR instead of flyby. */
@@ -340,8 +351,12 @@ void x5_close(x5_capture *capture) {
 int x5_open(x5_capture **out, int profile, double exposure_us, double again, double dgain) {
     *out = NULL;
     x5_exposure_state state;
+#ifdef X5_RAW_ONLY
+    memset(&state,0,sizeof(state));
+#else
     int validation=x5_exposure_request(&state,exposure_us,again,dgain);
     if(validation) return validation;
+#endif
     const hvs_config_pair_t *cfg=hvs_config_get(profile);
     if (!cfg) return -1;
     x5_capture *c=calloc(1,sizeof(*c));
@@ -356,6 +371,11 @@ int x5_open(x5_capture **out, int profile, double exposure_us, double again, dou
     if(c->pipes[0].pipe_contex.sensor_config->vin_ochn_attr->vin_basic_attr.format != SENSOR_DATA_TYPE_RAW8 ||
        c->pipes[1].pipe_contex.sensor_config->isp_ochn_attr->fmt != FRM_FMT_NV12 ||
        c->pipes[1].pipe_contex.sensor_config->isp_ochn_attr->bit_width != 8) {ret=-1; goto fail;}
+#ifdef X5_RAW_ONLY
+    if(profile!=1 || c->pipes[1].pipe_contex.sensor_config->vin_ochn_attr->vin_basic_attr.format!=SENSOR_DATA_TYPE_RAW10 ||
+       c->pipes[1].pipe_contex.sensor_config->camera_config->fps!=30) {ret=-1;goto fail;}
+    fprintf(stderr,"Raw profile 1: APS input RAW10 nominal fps=30; actual rate must be measured (no ISP)\n");
+#endif
     ret=hb_mem_module_open(); if(ret!=0) goto fail;
     c->memory_open=1;
     /* Official sequence: one camera object per VC, probe shared RX only once.
@@ -364,31 +384,60 @@ int x5_open(x5_capture **out, int profile, double exposure_us, double again, dou
     /* Both camera initializations/start sequences must finish before controls.
        Keep the sample's dual-camera ownership until driver semantics are known. */
     fprintf(stderr, "Exposure control stage=after_both_vflows_started profile=%d APS_config=%s sensor_actual=unknown\n", profile, cfg->vc1_cfg);
+    #ifndef X5_RAW_ONLY
     ret=isp_set_manual_2a(c->pipes[1].pipe_contex.isp_node_handle, &c->exposure);
     if(ret) goto fail;
+    #else
+    fprintf(stderr,"Pure VIN: no ISP node or ISP AE created; two independent consumers required\n");
+    #endif
     *out=c; return 0;
 fail:
     x5_close(c); return ret ? ret : -1;
 }
 int x5_get(x5_capture *c, int aps, x5_image *out) {
     memset(out,0,sizeof(*out));
+#ifdef X5_RAW_ONLY
+    hbn_vnode_image_t *image=&c->raw_slots[aps?1:0];
+    memset(image,0,sizeof(*image));
+#else
     hbn_vnode_image_t *image=calloc(1,sizeof(*image));
+#endif
     if(!image) return X5_CAPTURE_FATAL;
     hbn_vnode_handle_t node=aps ? c->pipes[1].pipe_contex.isp_node_handle : c->pipes[0].pipe_contex.vin_node_handle;
+#ifdef X5_RAW_ONLY
+    node=c->pipes[aps ? 1 : 0].pipe_contex.vin_node_handle;
+#endif
+    const uint64_t wait_start=capture_ns();
     int ret=hbn_vnode_getframe(node,0,100,image);
-    if(ret!=0) { free(image); return ret; }
+    out->wait_ns=capture_ns()-wait_start;
+    if(ret!=0) {
+#ifndef X5_RAW_ONLY
+        free(image);
+#endif
+        return ret;
+    }
     out->lease=image;
+#ifndef X5_RAW_ONLY
     if(aps && (image->buffer.format != MEM_PIX_FMT_NV12 || image->buffer.plane_cnt < 2)) {
         fprintf(stderr,"Unexpected ISP output format=%d planes=%d (expected NV12)\n",
                 image->buffer.format,image->buffer.plane_cnt);
         x5_release(c,aps,out); return X5_CAPTURE_FATAL;
     }
+#endif
     out->width=image->buffer.width; out->height=image->buffer.height;
     out->stride=image->buffer.stride; out->frame_id=image->info.frame_id;
-    for(int p=0;p<(aps?2:1);++p) {
+    out->format=image->buffer.format;
+    int planes=aps?2:1;
+#ifdef X5_RAW_ONLY
+    planes=1;
+    if(image->buffer.plane_cnt != 1) { x5_release(c,aps,out); return X5_CAPTURE_FATAL; }
+#endif
+    for(int p=0;p<planes;++p) {
         out->plane[p]=image->buffer.virt_addr[p]; out->size[p]=image->buffer.size[p];
         if(out->plane[p] && out->size[p]) {
+            const uint64_t cache_start=capture_ns();
             ret=hb_mem_invalidate_buf_with_vaddr((uint64_t)out->plane[p],out->size[p]);
+            out->cache_ns+=capture_ns()-cache_start;
             if(ret!=0) { fprintf(stderr,"Cache invalidation failed: %d\n",ret); x5_release(c,aps,out); return X5_CAPTURE_FATAL; }
         }
     }
@@ -397,14 +446,37 @@ int x5_get(x5_capture *c, int aps, x5_image *out) {
 int x5_release(x5_capture *c, int aps, x5_image *image) {
     if(!image->lease) return 0;
     hbn_vnode_handle_t node=aps ? c->pipes[1].pipe_contex.isp_node_handle : c->pipes[0].pipe_contex.vin_node_handle;
+#ifdef X5_RAW_ONLY
+    node=c->pipes[aps ? 1 : 0].pipe_contex.vin_node_handle;
+#endif
     int ret=hbn_vnode_releaseframe(node,0,(hbn_vnode_image_t*)image->lease);
     if(ret) fprintf(stderr,"hbn_vnode_releaseframe failed: %d\n",ret);
-    free(image->lease); image->lease=NULL;
+#ifndef X5_RAW_ONLY
+    free(image->lease);
+#endif
+    image->lease=NULL;
     return ret;
 }
 
 int x5_get_exposure_state(const x5_capture *c, x5_exposure_state *out) {
     if (!c || !out) return X5_CAPTURE_FATAL;
     *out=c->exposure;
+    return 0;
+}
+
+int x5_raw_identity(x5_capture *c, int *address, int *mode, int *config_index, int *bus) {
+    if(!c) return X5_CAPTURE_FATAL;
+    camera_config_t *cfg=c->pipes[1].pipe_contex.sensor_config->camera_config;
+    *address=cfg->addr; *mode=cfg->sensor_mode; *config_index=cfg->config_index;
+    /* vp_sensor_fixed_mipi_host stores the selected vcon number in csi.index.
+       Use the same device-tree bus property as vp_sensors.c, not a guessed bus. */
+    *bus=-1;
+    char path[128];unsigned char bytes[4];
+    snprintf(path,sizeof(path),"/proc/device-tree/soc/cam/vcon@%d/bus",c->pipes[1].pipe_contex.csi_config.index);
+    FILE *file=fopen(path,"rb");
+    if(file) {
+        if(fread(bytes,1,4,file)==4 && bytes[0]==0 && bytes[1]==0 && bytes[2]==0) *bus=bytes[3];
+        fclose(file);
+    }
     return 0;
 }

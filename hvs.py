@@ -82,6 +82,12 @@ def runtime_env(vin_bypass=False):
 
 def print_exposure_summary(summary):
     """Old recordings keep missing values unknown; never substitute requests."""
+    if summary.get('backend') == 'native_dual_vin_v1':
+        for key in ('aps_exposure_requested_us', 'aps_exposure_submitted_lines',
+                    'aps_gain_requested_db', 'aps_gain_submitted_db', 'aps_register_verification'):
+            print(key + '=' + summary.get(key, 'unknown'))
+        print('Exposure readback: register configuration only; per-frame actual exposure unavailable.')
+        return
     for label, keys in (
         ('REQUEST', ('aps_exposure_requested_us', 'aps_gain_requested', 'aps_dgain_requested')),
         ('SUBMIT', ('aps_exposure_submitted_seconds', 'aps_gain_submitted', 'aps_dgain_submitted')),
@@ -108,6 +114,7 @@ def main(argv=None):
     b.add_argument('--with-player', action='store_true')
     b.add_argument('--jobs', type=int, default=2)
     b.add_argument('--with-native-live', action='store_true')
+    b.add_argument('--with-vin-record', action='store_true', help='Build native independent dual-VIN memory recorder')
     b.add_argument('--platform-samples', type=Path, default=Path('/app/multimedia_samples'))
     b.add_argument('--sdk-root', type=Path, default=Path('/usr/hobot'))
     b.add_argument('--sdk-include-dir', type=Path, action='append', default=[],
@@ -119,7 +126,17 @@ def main(argv=None):
     r.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     r.add_argument('--output', type=Path, required=True, help='New session directory; must not exist')
     r.add_argument('--x5-vin-bypass', action='store_true',
-                   help='Experimental: bypass ISP using an exact-version guarded library copy')
+                   help='Native independent dual VIN; requires build --with-vin-record')
+    r.add_argument('--legacy-sdk-bypass', action='store_true', help='Old patched SDK/tmpfs baseline only')
+    r.add_argument('--diagnostic', choices=['record', 'receive', 'copy'], default='record')
+    r.add_argument('--warmup', type=number, default=1)
+    exposure = r.add_mutually_exclusive_group()
+    exposure.add_argument('--aps-exposure-us', type=number)
+    exposure.add_argument('--aps-exposure-lines', type=int)
+    r.add_argument('--aps-line-time-us', type=number, help='Independently verified timing for this exact mode; never inferred from nominal fps')
+    r.add_argument('--aps-gain-db', type=number, help='Analog gain 0..24 dB, nearest 0.375 dB; digital gain fixed at 1')
+    r.add_argument('--i2c-bus', type=int, help='Explicit verified bus for manual control; no forced ownership')
+    r.add_argument('--i2c-address', type=lambda s: int(s, 0), default=0x3c)
     r.add_argument('--seconds', type=number, default=0)
     r.add_argument('--timeout', type=number, default=10)
     r.add_argument('--aps-stall-timeout', type=number, default=2,
@@ -149,7 +166,7 @@ def main(argv=None):
     p.add_argument('--aps-config', type=Path, help='Software ISP JSON; used only for explicit Bayer playback')
     p.add_argument('--aps-wb', choices=['off','manual','once','continuous'])
     sub.add_parser('aps-capabilities', help='Report verified bundled SDK capabilities; no hardware probe')
-    for key in ('exposure-us','fps','format','gain','ae','hardware-wb'):
+    for key in ('fps','format','gain','ae','hardware-wb'):
         r.add_argument('--aps-'+key, help='Unavailable in bundled SDK; explicit error before capture')
     d = sub.add_parser('diagnose', help='Read-only platform/library checks')
     d.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
@@ -158,12 +175,35 @@ def main(argv=None):
         print((ROOT / 'tools/aps_capabilities.json').read_text(encoding='utf-8'))
         return 0
     if args.command == 'record':
-        for key in ('exposure_us','fps','format','gain','ae','hardware_wb'):
+        for key in ('fps','format','gain','ae','hardware_wb'):
             if getattr(args, 'aps_'+key) is not None:
                 raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
+        manual = any(x is not None for x in (args.aps_exposure_us, args.aps_exposure_lines, args.aps_gain_db))
+        if args.x5_vin_bypass and args.legacy_sdk_bypass:
+            parser.error('Choose native VIN or the legacy SDK baseline')
+        if manual and not args.x5_vin_bypass:
+            raise RuntimeError('APS manual control requires --x5-vin-bypass (native VIN); bundled SDK control unavailable')
+        if manual and args.i2c_bus is None:
+            parser.error('Manual control requires explicit --i2c-bus verified from board configuration')
+        if args.aps_exposure_us is not None and (args.aps_exposure_us <= 0 or not args.aps_line_time_us):
+            parser.error('--aps-exposure-us requires positive --aps-line-time-us verified for the actual mode; alternatively use --aps-exposure-lines')
+        if args.aps_exposure_lines is not None and not 1 <= args.aps_exposure_lines <= 1162:
+            parser.error('--aps-exposure-lines must be in [1,1162]')
+        if args.aps_gain_db is not None and args.aps_gain_db > 24:
+            parser.error('--aps-gain-db supports only the verified-table segment 0..24 dB')
+        if args.diagnostic != 'record' and not args.x5_vin_bypass:
+            parser.error('receive/copy diagnostics require native --x5-vin-bypass')
+        if args.x5_vin_bypass and (args.storage != 'memory' or args.max_mib < 64):
+            parser.error('Native VIN requires --storage memory and --max-mib >=64 (includes workspace)')
     if args.command == 'stop':
         folder = args.output.resolve()
-        summary = read_summary(folder)
+        def stop_result():
+            summary = read_summary(folder)
+            diag = folder / 'diagnostic.txt'
+            if summary is None and diag.is_file():
+                summary = dict(line.split('=', 1) for line in diag.read_text().splitlines() if '=' in line)
+            return summary
+        summary = stop_result()
         if summary:
             print(summary)
             return 0 if summary.get('status') == 'complete' else 2
@@ -173,7 +213,7 @@ def main(argv=None):
         (folder / 'stop.request').touch(exist_ok=True)
         end = time.monotonic() + args.wait
         while time.monotonic() < end:
-            summary = read_summary(folder)
+            summary = stop_result()
             if summary:
                 print(summary)
                 return 0 if summary.get('status') == 'complete' else 2
@@ -195,7 +235,8 @@ def main(argv=None):
         if args.cross:
             command.append('-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'toolchains/toolchain-aarch64-linux-gnu.cmake'))
         command += ['-DHV_X5_NATIVE=' + ('ON' if args.with_native_live else 'OFF')]
-        if args.with_native_live:
+        command += ['-DHV_X5_VIN_RECORD=' + ('ON' if args.with_vin_record else 'OFF')]
+        if args.with_native_live or args.with_vin_record:
             command += ['-DHV_PLATFORM_SAMPLES=' + str(args.platform_samples.resolve()),
                         '-DHV_X5_SDK_ROOT=' + str(args.sdk_root.resolve()),
                         '-DHV_X5_SDK_INCLUDE_DIRS=' + ';'.join(str(p.resolve()) for p in args.sdk_include_dir)]
@@ -203,6 +244,8 @@ def main(argv=None):
         targets = ['hv_hvs_record', 'hv_hvs_raw_to_csv']
         if args.with_native_live:
             targets.append('hv_sample_live_record_display')
+        if args.with_vin_record:
+            targets.append('hv_hvs_record_vin')
         if args.with_player:
             targets.append('hv_sample_player')
         check_build_targets(build, targets)
@@ -256,17 +299,27 @@ def main(argv=None):
         if folder.exists():
             raise RuntimeError('Output exists; choose a NEW session directory to prevent overwrite')
         folder.parent.mkdir(parents=True, exist_ok=True)
-        if shutil.disk_usage(folder.parent).free < args.max_mib * 1048576 + 64 * 1048576:
-            raise RuntimeError('Insufficient free space for --max-mib plus 64 MiB margin')
-        binary = executable(build, 'hv_hvs_record', 'hvs_record')
+        disk_budget = args.max_mib * 1048576 * (2 if args.x5_vin_bypass else 1) + 64 * 1048576
+        if shutil.disk_usage(folder.parent).free < disk_budget:
+            raise RuntimeError('Insufficient free space for recording plus compatibility files and margin')
+        binary = executable(build, 'hv_hvs_record_vin' if args.x5_vin_bypass else 'hv_hvs_record', 'hvs_record')
         command = [str(binary), '--output', str(folder), '--seconds', str(args.seconds),
                    '--timeout', str(args.timeout), '--aps-stall-timeout', str(args.aps_stall_timeout), '--aps-width', str(args.width), '--aps-height', str(args.height),
                    '--evs-width', str(args.evs_width), '--evs-height', str(args.evs_height),
                    '--max-mib', str(args.max_mib), '--storage', args.storage]
         if args.storage == 'memory':
             command += ['--ram-dir', str(args.ram_dir)]
+        if args.x5_vin_bypass:
+            command += ['--diagnostic', args.diagnostic, '--warmup', str(args.warmup)]
+            for key in ('aps_exposure_us', 'aps_exposure_lines', 'aps_line_time_us', 'aps_gain_db', 'i2c_bus', 'i2c_address'):
+                value = getattr(args, key)
+                if value is not None:
+                    command += ['--' + key.replace('_', '-'), str(value)]
+        if binary.is_file():
+            print(f'Record executable: {binary.resolve()} sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}', flush=True)
+        print('Record arguments:', command[1:], flush=True)
         # Replace this process: Ctrl+C/SIGTERM reaches the C++ signal handler directly.
-        os.execve(str(binary), command, runtime_env(vin_bypass=args.x5_vin_bypass))
+        os.execve(str(binary), command, runtime_env(vin_bypass=args.legacy_sdk_bypass))
     if args.command == 'play':
         if args.speed <= 0:
             parser.error('--speed must be positive')

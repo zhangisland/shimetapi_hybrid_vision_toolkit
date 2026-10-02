@@ -1,3 +1,5 @@
+recordings/
+tools/
 .work*
 *.log
 *.png

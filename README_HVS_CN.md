@@ -1,4 +1,23 @@
-# 以下内容仅针对 HVS APX 003CE + RDK X5 3.4.1
+# 以下内容仅针对 HVS APX 003CC + RDK X5 3.4.1
+
+**原生内存录制更新**：`hvs.py record --x5-vin-bypass` 现在需要先
+`hvs.py build --with-vin-record`，使用独立双 VIN、停止后落盘和外部曝光控制。
+参见 [构建、曝光、内存边界及性能验收说明](README_VIN_MEMORY_CN.md)。
+旧 patched SDK 对照改用 `--legacy-sdk-bypass`。
+
+## 必要的构建库
+以下开发库二选一
+1. `git clone https://github.com/ShiMetaPi/shimetapi_hybrid_vision_toolkit`  # 原始官方库
+2. `git clone https://github.com/zhangisland/shimetapi_hybrid_vision_toolkit` # 我修改过的
+
+
+```bash
+./run.sh build x5      # aarch64 交叉；工具链与 SDK 已就绪即可
+
+# 如果后续运行代码提示缺libxxx, 可能需要的:
+export LD_LIBRARY_PATH=/app/shimetapi_hybrid_vision_toolkit/lib/x5${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
 
 ## HVS相关的源代码编译
 ```bash

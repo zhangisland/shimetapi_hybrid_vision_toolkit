@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Legacy prebuilt Camera interface; native live backend has separate capabilities below. No hardware probe.",
+  "scope": "Legacy prebuilt Camera interface; native live and native VIN recorder capabilities below. No hardware probe.",
   "exposure": {
     "available": false,
     "requested": null,
@@ -61,6 +61,18 @@
     "x5": "6ae0ae6ba5335f8a2f09b546ab49ccade1e22474ddd5e161a9bdb5f78b147f4f",
     "s100": "b2be3e047c4723c818f0d76564937a0a66d3a7542393443cb5b4e2f13faa9d91",
     "x86_64": "b90a7480d8e1398db95c821ecf324614abb5483f120a476bfa410dd141d1d3bc"
+  },
+  "native_vin_record": {
+    "entry": "hvs.py build --with-vin-record; hvs.py record --x5-vin-bypass",
+    "storage": "bounded preallocated process arena, both raw DMA planes; save only after camera stops",
+    "exposure_lines": "1..1162, reg16/data8 0x015A low nibble and 0x015B, latch 0x342C=0,1,0",
+    "exposure_us": "requires independently verified --aps-line-time-us, rounds to nearest line; no nominal-fps inference",
+    "gain_db": "0..24 analog, nearest 0.375 dB using supplied guide's 65-entry analog table; digital unity",
+    "ownership": "explicit verified I2C bus, configured 7-bit address, chip ID check, non-forced I2C_SLAVE, no ISP created",
+    "readback": "register snapshot after set, periodically and before stop; SDK exposure getter unavailable; not per-frame actual exposure",
+    "raw_layout": "full original planes plus stride; APS profile RAW10 16-bit words, preview uses SDK-audited word >> 2",
+    "performance": "independent VIN consumers, no dispatch latest-frame slot; VIN IDs and full-window rates measured, sensor output/loss upstream unknown",
+    "verified": "host C++ fake backend and CLI tests; production SDK build, X5 30 FPS and optical response pending"
   },
   "native_live": {
     "entry": "hvs.py build --with-native-live; hvs.py live -- --help",

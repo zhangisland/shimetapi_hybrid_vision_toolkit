@@ -19,6 +19,8 @@ typedef struct {
     size_t size[2];
     int width, height, stride, frame_id;
     void *lease;
+    int format; /* actual hbn buffer format; raw recorder preserves all bytes */
+    uint64_t wait_ns, cache_ns;
 } x5_image;
 /* Configuration is initialization-only. AE auto is deliberately unavailable for
  * this HVS sensor_mode=2 profile (official sample reports nonconvergence). */
@@ -26,6 +28,8 @@ int x5_open(x5_capture **out, int profile, double exposure_us, double again, dou
 int x5_get(x5_capture *, int aps, x5_image *out); /* 100 ms SDK wait */
 int x5_release(x5_capture *, int aps, x5_image *);
 void x5_close(x5_capture *);
+/* Raw-only build: configuration identity for ownership/control checks. */
+int x5_raw_identity(x5_capture *, int *address, int *mode, int *config_index, int *bus);
 #ifdef __cplusplus
 }
 #endif
