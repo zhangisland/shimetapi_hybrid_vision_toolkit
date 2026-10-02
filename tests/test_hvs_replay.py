@@ -21,6 +21,11 @@ class ReplayTests(unittest.TestCase):
         command=self.replay(4)
         self.assertEqual('gbrg', command[command.index('--aps-bayer')+1])
 
+    def test_player_viewport_forwarding(self):
+        command=self.replay(4,['--window-width','1024','--window-height','600'])
+        self.assertEqual('1024',command[command.index('--window-width')+1])
+        self.assertEqual('600',command[command.index('--window-height')+1])
+
     def test_native_nv12_does_not_demosaic(self):
         self.assertNotIn('--aps-bayer', self.replay(0))
 

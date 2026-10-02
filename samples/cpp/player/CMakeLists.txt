@@ -34,3 +34,8 @@ else()
         message(STATUS "OpenCV not found — skipping hv_sample_player")
     endif()
 endif()
+
+if(TARGET hv_sample_player)
+    find_package(Threads REQUIRED)
+    target_link_libraries(hv_sample_player PRIVATE Threads::Threads)
+endif()

@@ -68,34 +68,65 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
 // ApsFrameCache
 // ============================================================================
 bool ApsFrameCache::open(const std::string& path, double fallback_fps) {
-    frames_.clear(); timestamps_.clear();
-    return reader_.open(path, fallback_fps);
+    shutdown();frames_.clear();path_=path;quitting_=false;exhausted_=false;
+    if(!reader_.open(path,fallback_fps)) return false;
+    fps_=reader_.fps();total_=reader_.totalFrameCount();requested_=0;pending_=true;
+    worker_=std::thread(&ApsFrameCache::decodeLoop,this);
+    return true;
 }
-double ApsFrameCache::fps() const { return reader_.fps(); }
+ApsFrameCache::~ApsFrameCache() {shutdown();}
+void ApsFrameCache::shutdown() {
+    {std::lock_guard<std::mutex> lock(mutex_);quitting_=true;}
+    wake_.notify_all();if(worker_.joinable()) worker_.join();
+}
+void ApsFrameCache::decodeLoop() {
+    uint64_t next=0;
+    for(;;) {
+        bool rewind=false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            wake_.wait(lock,[&]{return quitting_||pending_;});
+            if(quitting_) return;
+            if(frames_.count(requested_)) {pending_=false;continue;}
+            rewind=requested_<next;
+            if(rewind) {frames_.clear();exhausted_=false;next=0;}
+            if(exhausted_) {pending_=false;continue;}
+        }
+        cv::Mat frame;Shimeta::EvsTimestamp timestamp{};bool ok=false;
+        try {
+            if(rewind) {reader_.setIsp(isp_);if(!reader_.open(path_,fps_)) throw std::runtime_error("Cannot rewind AVI");}
+            // Cancellation and requests are checked between individual frames.
+            ok=reader_.readFrameAt(next,frame,&timestamp);
+        } catch(const std::exception& e) {std::cerr<<"APS playback decode: "<<e.what()<<std::endl;}
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(!ok) {exhausted_=true;total_=next;pending_=false;continue;}
+            frames_[next]={std::move(frame),timestamp};++next;
+            while(frames_.size()>8) frames_.erase(frames_.begin());
+            pending_=!frames_.count(requested_);
+        }
+    }
+}
+double ApsFrameCache::fps() const { return fps_; }
 size_t ApsFrameCache::frameCount() const {
-    uint64_t total = reader_.totalFrameCount();
-    return total > 0 ? size_t(total) : frames_.size();
+    std::lock_guard<std::mutex> lock(mutex_);return size_t(total_);
 }
 bool ApsFrameCache::frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index) {
-    while (frames_.size() <= index) {
-        cv::Mat next;
-        Shimeta::EvsTimestamp ts;
-        if (!reader_.readFrameAt(frames_.size(), next, &ts)) break;
-        frames_.push_back(next.clone());
-        timestamps_.push_back(ts);
-    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    requested_=total_?std::min(index,total_-1):index;
+    pending_=true;wake_.notify_one();
     if (frames_.empty()) return false;
-    size_t clamped = std::min<size_t>(size_t(index), frames_.size() - 1);
-    if (actual_index) *actual_index = uint64_t(clamped);
-    frame = frames_[clamped].clone();
+    auto it=frames_.upper_bound(requested_);
+    if(it!=frames_.begin()) --it;
+    if (actual_index) *actual_index = it->first;
+    frame = it->second.frame;
     return !frame.empty();
 }
 Shimeta::EvsTimestamp ApsFrameCache::timestampAt(uint64_t index) const {
-    if (timestamps_.empty()) return {};
-    size_t clamped = std::min<size_t>(size_t(index), timestamps_.size() - 1);
-    return timestamps_[clamped];
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it=frames_.find(index);return it==frames_.end()?Shimeta::EvsTimestamp{}:it->second.timestamp;
 }
-size_t ApsFrameCache::cachedFrameCount() const { return frames_.size(); }
+size_t ApsFrameCache::cachedFrameCount() const {std::lock_guard<std::mutex> lock(mutex_);return frames_.size();}
 
 // ============================================================================
 // EvsFrameSequence
@@ -488,8 +519,8 @@ std::chrono::steady_clock::time_point evsStartForFrame(uint64_t fi, double spd) 
 }
 
 /** @brief 同上，APS 侧（使用 kApsFps）。 */
-std::chrono::steady_clock::time_point apsStartForFrame(uint64_t fi, double spd) {
-    return std::chrono::steady_clock::now() - std::chrono::microseconds(int64_t(double(fi) * 1000000.0 / (kApsFps * spd)));
+std::chrono::steady_clock::time_point apsStartForFrame(uint64_t fi, double spd, double fps) {
+    return std::chrono::steady_clock::now() - std::chrono::microseconds(int64_t(double(fi) * 1000000.0 / (fps * spd)));
 }
 
 /** @brief EVS 是否已到末尾。 */
@@ -499,7 +530,7 @@ bool isEvsAtEnd(uint64_t fi, size_t fc, EvsStepMode mode) {
 
 /** @brief APS 是否已到已知末尾（已缓存的最后一帧）。 */
 bool isApsAtKnownEnd(uint64_t fi, const ApsFrameCache& vc) {
-    return vc.cachedFrameCount() > 0 && fi >= uint64_t(vc.cachedFrameCount() - 1);
+    const auto count=vc.frameCount();return count>0 && fi>=count-1;
 }
 
 /** @brief UiAction → 播放速度（非速度类动作返回 0）。 */
@@ -680,7 +711,7 @@ void printGuiStartupError(const cv::Exception& e) {
 
 /** @brief 打印命令行用法。 */
 void printUsage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <events.raw> <video.avi> [fps] [speed] [--aps-bayer PATTERN] [--aps-config JSON] [--aps-wb MODE]\n"
+    std::cerr << "Usage: " << prog << " <events.raw> <video.avi> [fps] [speed] [--aps-bayer PATTERN] [--aps-config JSON] [--aps-wb MODE] [--window-width 1280 --window-height 720]\n"
               << "       " << prog << " <events.raw> <video.avi> --dump-timestamps\n"
               << "  events.raw : EVS 录制文件（toolkit EventReader 格式）\n"
               << "  video.avi  : APS AVI 录制文件（含 tsmp chunk）\n"
@@ -743,6 +774,21 @@ void mouseCallback(int event, int x, int y, int, void*) {
             return;
         }
     }
+}
+
+cv::Mat fitPlayerCanvas(const cv::Mat& canvas,int max_width,int max_height) {
+    if(canvas.empty()||max_width<1||max_height<1) throw std::invalid_argument("Invalid player viewport");
+    const double scale=std::min({1.0,double(max_width)/canvas.cols,double(max_height)/canvas.rows});
+    if(scale>=1) return canvas;
+    const int width=std::max(1,int(canvas.cols*scale)),height=std::max(1,int(canvas.rows*scale));
+    cv::Mat out;cv::resize(canvas,out,cv::Size(width,height),0,0,cv::INTER_AREA);
+    const double sx=double(width)/canvas.cols,sy=double(height)/canvas.rows;
+    std::lock_guard<std::mutex> lock(g_ui_mutex);
+    for(auto& button:g_ui_buttons) {
+        const auto r=button.rect;
+        button.rect=cv::Rect(int(r.x*sx),int(r.y*sy),std::max(1,int(r.width*sx)),std::max(1,int(r.height*sy)));
+    }
+    return out;
 }
 
 } // namespace hv_player

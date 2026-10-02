@@ -1,5 +1,28 @@
 # X5 APX003CC：双 VIN 内存录制与手动曝光
 
+## 播放器黑窗或窗口显示不全的更新
+
+播放器现在用后台线程解码 APS，最多缓存 8 个 BGR 帧；GUI 主线程不会为了追赶播放时间
+一次性去马赛克大量帧。窗口先绘制完整界面，再显示后台产生的帧。默认完整画布缩放到
+1280×720 范围内，使用可调整大小的窗口；侧栏、底部按钮及点击坐标一起缩放。
+播放时间改为使用 AVI 中记录的实际平均帧率，不再硬编码 30。录制文件不需要重新生成。
+
+更新 `hvs.py`、`samples/cpp/player` 源码后，在板端重编译播放器（只替换 Python 不够）：
+
+```bash
+cd /app/shimetapi_hybrid_vision_toolkit
+cmake --build out/x5/hvs-build --parallel 2 --target hv_sample_player
+python3 hvs.py play --output /app/recordings/vin_01
+
+# 较小桌面 / X11 转发时，可进一步限制画布大小
+python3 hvs.py play --output /app/recordings/vin_01 --window-width 1024 --window-height 600
+```
+
+若当前构建目录没有 player 目标，先运行下方完整的 `hvs.py build --with-vin-record --with-player`。
+AT-SPI accessibility bus 警告本身不能证明解码或窗口失败。新代码修正了可确认的同步解码
+阻塞和固定窗口尺寸问题；实际 MobaXterm/X11 显示仍需板端复测。本地测试覆盖慢解码下
+非阻塞取帧、8 帧容量、缓存淘汰后倒退、完整画布和缩放后的按钮命中，并编译检查主程序。
+
 本次改动直接接入 `hvs.py record --x5-vin-bypass`。该参数现在启动
 `hv_hvs_record_vin`，不再启动旧的 patched Camera SDK。需要重新构建，不能只更新
 `hvs.py`。旧路径可以用 `--legacy-sdk-bypass` 显式选择作对照。
@@ -84,8 +107,7 @@ APX003CC →                                                        ↓
 
 ```bash
 cd /app/shimetapi_hybrid_vision_toolkit
-python3 hvs.py build --with-vin-record --with-player \
-  --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
+python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
 
 # 若头文件分散，按构建错误提示重复追加 --sdk-include-dir DIR。
 # 没有 OpenCV 时去掉 --with-player，仍能构建录制目标。
@@ -114,19 +136,18 @@ libshimetapi_hv。部署时保留新二进制、项目 `lib/x5`、匹配平台�
 避免本程序的重复实例；无法强制协调不使用该锁的其他厂商程序。
 
 ```bash
-python3 hvs.py record --x5-vin-bypass --storage memory \
-  --output ./recordings/vin_01 --seconds 5 --warmup 1 --max-mib 1024
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/vin_01 --seconds 5 --warmup 1 --max-mib 1024
 
 # 另一个终端，或原终端 Ctrl+C：
-python3 hvs.py stop --output ./recordings/vin_01 --wait 120
+python3 hvs.py stop --output /app/recordings/vin_01 --wait 120
 
 # 仅当终端报告 SAVE FAILED 后：释放输出所在磁盘空间/修复权限，然后
-touch ./recordings/vin_01/retry.request
+touch /app/recordings/vin_01/retry.request
 
-python3 hvs.py play --output ./recordings/vin_01
-python3 hvs.py play --output ./recordings/vin_01 --dump-timestamps
-python3 hvs.py export-csv --input ./recordings/vin_01/events.raw --output ./events_01.csv
-python3 tools/apx003cc_diagnostics/check_vin_recording.py ./recordings/vin_01
+python3 hvs.py play --output /app/recordings/vin_01
+python3 hvs.py play --output /app/recordings/vin_01 --dump-timestamps
+python3 hvs.py export-csv --input /app/recordings/vin_01/events.raw --output ./events_01.csv
+python3 tools/apx003cc_diagnostics/check_vin_recording.py /app/recordings/vin_01
 ```
 
 文件：`aps.vin.bin`/`evs.vin.bin` 保存各自每个完整 DMA 平面（包括 stride/padding），
@@ -164,18 +185,13 @@ I2C_RDWR repeated-start 读取，大端寄存器地址字节。需要用户提�
 
 ```bash
 # 明亮环境：100 行 + 最低增益
-python3 hvs.py record --x5-vin-bypass --storage memory \
-  --output ./recordings/bright_100 --seconds 5 --max-mib 1024 \
-  --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/bright_100 --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
 
 # 固定场景、光圈、增益，分别采三档（目录必须是新目录）
 for lines in 20 100 500; do
-  python3 hvs.py record --x5-vin-bypass --storage memory \
-    --output "./recordings/exposure_${lines}" --seconds 5 --max-mib 1024 \
-    --i2c-bus 6 --aps-exposure-lines "$lines" --aps-gain-db 0
+  python3 hvs.py record --x5-vin-bypass --storage memory --output "/app/recordings/exposure_${lines}" --seconds 5 --max-mib 1024 --i2c-bus 6 --aps-exposure-lines "$lines" --aps-gain-db 0
 done
-python3 tools/apx003cc_diagnostics/check_vin_recording.py \
-  ./recordings/exposure_20 ./recordings/exposure_100 ./recordings/exposure_500
+python3 tools/apx003cc_diagnostics/check_vin_recording.py /app/recordings/exposure_20 /app/recordings/exposure_100 /app/recordings/exposure_500
 ```
 
 曝光写 `0x015A` 低 4 位（保留高位）及 `0x015B`，范围 1～1162 行；增益写
@@ -203,19 +219,19 @@ summary 分别记录请求、量化后提交、寄存器快照/保持检查、VT
 
 ```bash
 # A: 取帧、缓存同步、统计后立即释放，不保存负载
-python3 hvs.py record --x5-vin-bypass --storage memory --output ./recordings/diag_A \
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_A \
   --seconds 5 --warmup 1 --max-mib 1024 --diagnostic receive
 # B: 复制进有界 arena，结束后丢弃，仅保存诊断统计
-python3 hvs.py record --x5-vin-bypass --storage memory --output ./recordings/diag_B \
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_B \
   --seconds 5 --warmup 1 --max-mib 1024 --diagnostic copy
 # C: 旧版 SDK + tmpfs（诊断对照，不满足新内存热路径要求）
-python3 hvs.py record --legacy-sdk-bypass --storage memory --output ./recordings/diag_C \
+python3 hvs.py record --legacy-sdk-bypass --storage memory --output /app/recordings/diag_C \
   --seconds 5 --max-mib 1024
 # D: 新的完整两路录制
-python3 hvs.py record --x5-vin-bypass --storage memory --output ./recordings/diag_D \
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_D \
   --seconds 5 --warmup 1 --max-mib 1024
 python3 tools/apx003cc_diagnostics/check_vin_recording.py \
-  ./recordings/diag_A ./recordings/diag_B ./recordings/diag_D
+  /app/recordings/diag_A /app/recordings/diag_B /app/recordings/diag_D
 ```
 
 C 的原实现没有独立预热窗口，不能直接把总帧数与 A/B/D 作同窗口验收；先核实其日志
@@ -235,7 +251,7 @@ SDK 帧回调/配对队列/热路径编码；`queue_depth=0` 是指应用队列�
 
 ## 本地测试及待验证项
 
-Windows VS2022 编译原生录制 C++ 逻辑 + 假 VIN/IO，19 项 CTest 和 50 项 Python 测试通过。
+Windows VS2022 编译原生录制 C++ 逻辑 + 假 VIN/IO；加入播放器修复后，20 项 CTest 和 51 项 Python 测试通过。
 覆盖参数透传、互斥/范围、曝光换算、65 项表端点/量化、寄存器/latch/写失败/覆盖检测、
 并发 arena 边界、DMA 归还后字节不变、padding 保留、满容量保存、stop.request、SIGINT handler、
 首次封装失败/不可写保存路径保留内存并重试、诊断不假装完整会话、错误布局归还缓冲。模拟速率不是硬件速率。

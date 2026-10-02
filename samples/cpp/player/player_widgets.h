@@ -19,6 +19,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <map>
+#include <condition_variable>
+#include <thread>
 
 #include <opencv2/opencv.hpp>
 
@@ -88,11 +91,12 @@ private:
 /**
  * @brief APS 帧缓存。
  *
- * 在内存中缓存已解码的 BGR 帧与时间戳，供随机访问（拖动/快进）。
+ * 后台解码，最多缓存 8 个 BGR 帧；GUI 取帧不等待 ISP，淘汰后倒退可重新读取。
  */
 class ApsFrameCache {
 public:
-    void setIsp(const ApsIsp& isp) { reader_.setIsp(isp); }
+    ~ApsFrameCache();
+    void setIsp(const ApsIsp& isp) { isp_=isp; reader_.setIsp(isp); }
     bool open(const std::string& path, double fallback_fps);
     double fps() const;
     size_t frameCount() const;
@@ -100,9 +104,19 @@ public:
     Shimeta::EvsTimestamp timestampAt(uint64_t index) const;
     size_t cachedFrameCount() const;
 private:
-    VideoReader                   reader_;
-    std::vector<cv::Mat>          frames_;
-    std::vector<Shimeta::EvsTimestamp> timestamps_;
+    void decodeLoop();
+    void shutdown();
+    struct Cached {cv::Mat frame; Shimeta::EvsTimestamp timestamp;};
+    VideoReader reader_;
+    ApsIsp isp_;
+    mutable std::mutex mutex_;
+    std::condition_variable wake_;
+    std::thread worker_;
+    std::map<uint64_t,Cached> frames_;
+    std::string path_;
+    uint64_t requested_=0, total_=0;
+    double fps_=30;
+    bool pending_=false, quitting_=false, exhausted_=false;
 };
 
 /**
@@ -169,7 +183,7 @@ uint64_t apsPlaybackTimestampUs(uint64_t fi, double fps);                       
 uint64_t alignEvsFrameToApsBoundary(uint64_t fi);                                       ///< EVS 帧号对齐到 APS 边界
 uint64_t clampEvsFrameIndex(uint64_t fi, size_t fc, EvsStepMode mode);                   ///< 限制 EVS 帧号范围并对齐
 std::chrono::steady_clock::time_point evsStartForFrame(uint64_t fi, double spd);         ///< 第 fi 帧在速度 spd 下的 EVS 播放起点
-std::chrono::steady_clock::time_point apsStartForFrame(uint64_t fi, double spd);         ///< 同上，APS 侧
+std::chrono::steady_clock::time_point apsStartForFrame(uint64_t fi, double spd, double fps = 30);
 bool isEvsAtEnd(uint64_t fi, size_t fc, EvsStepMode mode);                              ///< EVS 是否到末尾
 bool isApsAtKnownEnd(uint64_t fi, const ApsFrameCache& vc);                             ///< APS 是否到已缓存末尾
 double speedForAction(UiAction a);                                                       ///< UiAction → 播放速度（非速度类返回 0）
@@ -202,6 +216,7 @@ void printUsage(const char* prog);                   ///< 打印命令行用法
 bool dumpTimestamps(const std::string& raw_path, const std::string& avi_path,
                     std::ostream& out);             ///< CSV 输出 RAW8/AVI 的全部时间戳
 void mouseCallback(int event, int x, int y, int, void*);  ///< OpenCV 鼠标回调（命中按钮→g_pending_action）
+cv::Mat fitPlayerCanvas(const cv::Mat& canvas, int max_width, int max_height);
 
 } // namespace hv_player
 
