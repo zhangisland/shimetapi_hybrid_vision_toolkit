@@ -4,8 +4,23 @@
 #include <stdexcept>
 #include <vector>
 #include <utility>
+#include <sstream>
 
 namespace apx {
+// Match vp_sensors.c: reg16/data16 is ONE repeated-start read, not two
+// independent reg16/data8 accesses. Exposure registers still use data8.
+template<class IO> uint16_t verifyIdentity(IO& io, int bus, int address) {
+ uint8_t bytes[2]{};
+ io.readBytes(0x3428,bytes,2);
+ const auto id=uint16_t((uint16_t(bytes[0])<<8)|bytes[1]);
+ if(id!=0x0808) {
+   std::ostringstream msg;
+   msg<<"APX003CC chip identity mismatch: bus="<<bus<<" addr=0x"<<std::hex<<address
+      <<" reg=0x3428 reg16/data16 read=0x"<<id<<" expected=0x0808; no exposure writes performed";
+   throw std::runtime_error(msg.str());
+ }
+ return id;
+}
 // The supplied guide contains 146 rows, not 161. Restrict to the internally
 // consistent analog segment 0..64; do not invent the contradictory digital LUT.
 inline constexpr uint8_t analog[] = {

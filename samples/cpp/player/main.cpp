@@ -1,6 +1,8 @@
 // player: 离线回放 live_record_display 录制的 .raw + .avi 文件。
 // 本文件只保留信号处理与播放编排；数据/回放/UI 辅助代码见 player_widgets.{h,cpp}。
 #include "player_widgets.h"
+#include "replay_timeline.h"
+#include <tuple>
 
 #include <atomic>
 #include <chrono>
@@ -113,6 +115,11 @@ int main(int argc, char** argv) {
     TimestampSyncMap ts_sync;
     bool has_ts_sync = ts_sync.open(raw_path, avi_path);
 
+    ReplayTimeline timeline;
+    try {timeline.load(avi_path,evs_seq.packetEnds(),video_cache.frameCount());}
+    catch(const std::exception& e) {std::cerr<<e.what()<<std::endl;return 1;}
+    if(timeline.host) std::cout<<"SYNC: host receive approximation; offset="<<timeline.offsetUs
+        <<" us, offset spread="<<timeline.offsetSpreadUs<<" us. Not per-frame sensor sync.\n";
     auto img_size = evs_seq.imageSize();
     std::cout << "EVS raw: " << raw_path << " (" << img_size.first << "x" << img_size.second << ")\n";
     std::cout << "APS AVI: " << avi_path << ", fps=" << video_cache.fps() << "\n";
@@ -135,171 +142,135 @@ int main(int argc, char** argv) {
         cv::waitKey(1);
     } catch (const cv::Exception& e) { printGuiStartupError(e); return 1; }
 
-    // ---- 播放状态 ----
-    auto evs_play_start = std::chrono::steady_clock::now();
-    auto aps_play_start = std::chrono::steady_clock::now();
-    bool evs_playing = true, aps_playing = true;
-    uint64_t evs_frame_index = 0, aps_frame_index = 0;
-    uint64_t displayed_aps_index = 0;
-    EvsStepMode evs_step_mode = EvsStepMode::Aps;
-    EvsColorMode evs_color_mode = EvsColorMode::BlueRed;
-    bool sync_enabled = false;
-    bool sync_initialized = false;
-
-    // ---- 主循环 ----
-    while (g_running) {
-        UiAction action = UiAction(g_pending_action.exchange(int(UiAction::None)));
-
-        // 处理按钮指令
-        if (action != UiAction::None) {
-            if (action == UiAction::EvsTogglePlay) {
-                if (sync_enabled) { bool np = !(evs_playing || aps_playing); evs_playing = np; aps_playing = np;if(!np) aps_frame_index=displayed_aps_index; }
-                else evs_playing = !evs_playing;
-                if (evs_playing) {
-                    if (isEvsAtEnd(evs_frame_index, evs_seq.frameCount(), evs_step_mode)) evs_frame_index = 0;
-                    evs_play_start = evsStartForFrame(evs_frame_index, speed);
+    using Clock=std::chrono::steady_clock;
+    auto apsStart=Clock::now(),evsStart=apsStart,reportStart=apsStart;
+    bool evs_playing=true,aps_playing=true,sync_enabled=true,ready=false;
+    uint64_t evs_frame_index=0,aps_frame_index=0,displayed_aps_index=0;
+    EvsStepMode evs_step_mode=EvsStepMode::Aps;
+    EvsColorMode evs_color_mode=EvsColorMode::BlueRed;
+    uint64_t shown=0,skipped=0;
+    double maxPresentMs=0;
+    auto resetClocks=[&] {
+        const auto now=Clock::now();
+        apsStart=now-std::chrono::microseconds(int64_t(timeline.elapsed(aps_frame_index,video_cache.fps())/speed));
+        evsStart=now-std::chrono::microseconds(int64_t((evs_seq.processedTimestampAt(evs_frame_index)-evs_seq.processedTimestampAt(0))/speed));
+    };
+    Shimeta::EvsTimestamp displayedTimestamp{};
+    auto sensorForAps=[&](uint64_t index) {
+        const auto ts=displayedTimestamp;
+        if(ts.valid) return ts.processed_timestamp?ts.processed_timestamp:ts.raw_timestamp/200;
+        if(timeline.host) return timeline.time(index,video_cache.fps());
+        if(has_ts_sync) return ts_sync.apsSensorUs(index);
+        // Unknown offset: align recording starts explicitly, never compare
+        // relative APS frame/fps directly against absolute EVS sensor time.
+        return evs_seq.processedTimestampAt(0)+apsPlaybackTimestampUs(index,video_cache.fps());
+    };
+    using PaintState=std::tuple<uint64_t,uint64_t,bool,bool,bool,int,int,double>;
+    PaintState painted{};bool havePaint=false;
+    while(g_running) {
+        UiAction action=UiAction(g_pending_action.exchange(int(UiAction::None)));
+        if(action==UiAction::SyncOn||action==UiAction::SyncOff) {
+            sync_enabled=action==UiAction::SyncOn;aps_frame_index=displayed_aps_index;
+            if(sync_enabled) evs_playing=aps_playing;
+            resetClocks();
+        } else if(action==UiAction::ApsTogglePlay||action==UiAction::EvsTogglePlay) {
+            if(sync_enabled) {
+                aps_frame_index=displayed_aps_index;
+                aps_playing=!aps_playing;evs_playing=aps_playing;
+                if(aps_playing&&isApsAtKnownEnd(aps_frame_index,video_cache)) aps_frame_index=0;
+            } else if(action==UiAction::ApsTogglePlay) {
+                aps_frame_index=displayed_aps_index;aps_playing=!aps_playing;
+                if(aps_playing&&isApsAtKnownEnd(aps_frame_index,video_cache)) aps_frame_index=0;
+            } else {
+                evs_playing=!evs_playing;
+                if(evs_playing&&evs_frame_index+1>=evs_seq.frameCount()) evs_frame_index=0;
+            }
+            resetClocks();
+        } else if(action==UiAction::ApsPrev||action==UiAction::ApsNext||action==UiAction::EvsPrev||action==UiAction::EvsNext) {
+            const bool next=action==UiAction::ApsNext||action==UiAction::EvsNext;
+            if(sync_enabled||action==UiAction::ApsPrev||action==UiAction::ApsNext) {
+                aps_playing=false;if(sync_enabled) evs_playing=false;
+                aps_frame_index=next?std::min<uint64_t>(displayed_aps_index+1,video_cache.frameCount()-1):
+                    (displayed_aps_index?displayed_aps_index-1:0);
+            } else {
+                evs_playing=false;
+                const uint64_t step=evs_step_mode==EvsStepMode::Single?1:kEvsPerApsFrame;
+                evs_frame_index=next?std::min<uint64_t>(evs_frame_index+step,evs_seq.frameCount()-1):
+                    (evs_frame_index>step?evs_frame_index-step:0);
+            }
+            resetClocks();
+        } else if(action==UiAction::EvsStepSingle) evs_step_mode=EvsStepMode::Single;
+        else if(action==UiAction::EvsStepAps) evs_step_mode=EvsStepMode::Aps;
+        else if(action==UiAction::EvsColorBlueRed) evs_color_mode=EvsColorMode::BlueRed;
+        else if(action==UiAction::EvsColorOrangeYellow) evs_color_mode=EvsColorMode::OrangeYellow;
+        else if(speedForAction(action)>0) {
+            speed=speedForAction(action);aps_frame_index=displayed_aps_index;resetClocks();
+        }
+        const auto now=Clock::now();
+        if(ready&&aps_playing) {
+            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(now-apsStart).count();
+            aps_frame_index=timeline.index(uint64_t(std::max(0.0,double(us)*speed)),video_cache.fps());
+        }
+        if(ready&&evs_playing&&!sync_enabled) {
+            const auto us=std::chrono::duration_cast<std::chrono::microseconds>(now-evsStart).count();
+            const auto target=evs_seq.processedTimestampAt(0)+uint64_t(std::max(0.0,double(us)*speed));
+            evs_frame_index=evs_seq.frameIndexForTimestamp(target,EvsStepMode::Single);
+            if(target>=evs_seq.processedTimestampAt(evs_seq.frameCount()-1)) evs_playing=false;
+        }
+        cv::Mat frame;uint64_t actual=0;Shimeta::EvsTimestamp frameTimestamp{};
+        if(video_cache.frameAt(aps_frame_index,frame,&actual,&frameTimestamp)) {
+            // During an asynchronous backwards seek keep the previous COMPLETE
+            // pair until the requested frame is ready; don't show a future cache entry.
+            if(actual<=aps_frame_index) {
+                if(!ready||actual!=displayed_aps_index) {
+                    if(ready&&actual>displayed_aps_index+1) skipped+=actual-displayed_aps_index-1;
+                    ++shown;displayed_aps_index=actual;last_video_frame=frame;displayedTimestamp=frameTimestamp;
                 }
-                if (sync_enabled && aps_playing) {
-                    if (isApsAtKnownEnd(aps_frame_index, video_cache)) aps_frame_index = 0;
-                    aps_play_start = apsStartForFrame(aps_frame_index, speed, video_cache.fps());
+                if(!ready) {
+                    ready=true;aps_frame_index=actual;resetClocks();reportStart=Clock::now();
+                    if(!timeline.host&&!has_ts_sync&&!displayedTimestamp.valid)
+                        std::cerr<<"SYNC fallback: recording starts aligned; original clock offset UNKNOWN. Keep native vin.frames.jsonl for host alignment.\n";
                 }
-            } else if (action == UiAction::ApsTogglePlay) {
-                if (sync_enabled) { bool np = !(evs_playing || aps_playing); evs_playing = np; aps_playing = np; }
-                else aps_playing = !aps_playing;
-                if(!aps_playing) aps_frame_index=displayed_aps_index;
-                if (aps_playing) {
-                    if (isApsAtKnownEnd(aps_frame_index, video_cache)) aps_frame_index = 0;
-                    aps_play_start = apsStartForFrame(aps_frame_index, speed, video_cache.fps());
-                }
-                if (sync_enabled && evs_playing) {
-                    if (isEvsAtEnd(evs_frame_index, evs_seq.frameCount(), evs_step_mode)) evs_frame_index = 0;
-                    evs_play_start = evsStartForFrame(evs_frame_index, speed);
-                }
-            } else if (action == UiAction::EvsStepSingle) {
-                evs_step_mode = EvsStepMode::Single;
-            } else if (action == UiAction::EvsStepAps) {
-                evs_step_mode = EvsStepMode::Aps;
-                evs_frame_index = alignEvsFrameToApsBoundary(evs_frame_index);
-                if (evs_playing) evs_play_start = evsStartForFrame(evs_frame_index, speed);
-            } else if (action == UiAction::EvsPrev && evs_frame_index > 0) {
-                evs_playing = false;
-                uint64_t step = evs_step_mode == EvsStepMode::Aps ? kEvsPerApsFrame : 1;
-                evs_frame_index = clampEvsFrameIndex(evs_frame_index > step ? evs_frame_index - step : 0, evs_seq.frameCount(), evs_step_mode);
-            } else if (action == UiAction::EvsNext) {
-                evs_playing = false;
-                uint64_t step = evs_step_mode == EvsStepMode::Aps ? kEvsPerApsFrame : 1;
-                if (evs_frame_index + step < evs_seq.frameCount())
-                    evs_frame_index = clampEvsFrameIndex(evs_frame_index + step, evs_seq.frameCount(), evs_step_mode);
-            } else if (action == UiAction::ApsPrev && displayed_aps_index > 0) { aps_playing = false; aps_frame_index=displayed_aps_index-1; }
-            else if (action == UiAction::ApsNext) { aps_playing = false; aps_frame_index=displayed_aps_index+1; }
-            else if (action == UiAction::EvsColorBlueRed) evs_color_mode = EvsColorMode::BlueRed;
-            else if (action == UiAction::EvsColorOrangeYellow) evs_color_mode = EvsColorMode::OrangeYellow;
-            else if (action == UiAction::SyncOn) {
-                sync_enabled = true;
-                bool np = evs_playing || aps_playing;
-                evs_playing = np; aps_playing = np;
-            } else if (action == UiAction::SyncOff) sync_enabled = false;
-            else {
-                double sp = speedForAction(action);
-                if (sp > 0.0) { speed = sp; evs_play_start = evsStartForFrame(evs_frame_index, speed); aps_play_start = apsStartForFrame(aps_frame_index, speed, video_cache.fps()); }
+                if(isApsAtKnownEnd(actual,video_cache)) {aps_playing=false;if(sync_enabled) evs_playing=false;}
             }
         }
-
-        // 播放进度计算
-        if (evs_playing && !sync_enabled) {
-            auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - evs_play_start).count();
-            auto target_us = int64_t(double(wall_us) * speed);
-            if (evs_step_mode == EvsStepMode::Aps)
-                evs_frame_index = alignEvsFrameToApsBoundary(uint64_t(double(target_us) * kEvsFps / 1000000.0));
-            else
-                evs_frame_index = uint64_t(double(target_us) * kEvsFps / 1000000.0);
-            if (evs_frame_index >= evs_seq.frameCount()) {
-                evs_frame_index = clampEvsFrameIndex(evs_seq.frameCount() - 1, evs_seq.frameCount(), evs_step_mode);
-                evs_playing = false;
-            }
+        const auto apsTs=sensorForAps(displayed_aps_index);
+        std::string source="start aligned / approx";
+        if(displayedTimestamp.valid) source="AVI sensor tsmp";
+        else if(timeline.host) source="host bridge / approx";
+        else if(has_ts_sync) source="CSV clock bridge";
+        if(sync_enabled&&ready) evs_frame_index=evs_seq.frameIndexForTimestamp(apsTs,EvsStepMode::Single);
+        PaintState state{displayed_aps_index,evs_frame_index,sync_enabled,aps_playing,evs_playing,int(evs_step_mode),int(evs_color_mode),speed};
+        if(ready&&(!havePaint||state!=painted)) {
+            const auto paintStart=Clock::now();
+            // Accumulate a TIME window, not eight nonempty event frames.
+            const auto begin=evs_seq.processedTimestampAt(evs_frame_index);
+            const auto end=begin+uint64_t(1e6/video_cache.fps());
+            size_t count=1;
+            if(evs_step_mode==EvsStepMode::Aps) while(evs_frame_index+count<evs_seq.frameCount()&&
+                evs_seq.processedTimestampAt(evs_frame_index+count)<end) ++count;
+            const auto evs=evs_seq.accumulatedFrameAt(evs_frame_index,count,evs_color_mode);
+            cv::imshow(win_name,fitPlayerCanvas(composeSideBySide(evs,last_video_frame,apsTs,source,
+                displayed_aps_index,begin,evs_frame_index,video_cache.frameCount(),evs_seq.frameCount(),
+                evs_step_mode,evs_color_mode,sync_enabled,speed,evs_playing,aps_playing),window_width,window_height));
+            maxPresentMs=std::max(maxPresentMs,std::chrono::duration<double,std::milli>(Clock::now()-paintStart).count());
+            painted=state;havePaint=true;
         }
-        if (aps_playing) {
-            auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - aps_play_start).count();
-            aps_frame_index = uint64_t(double(double(wall_us) * speed) * video_cache.fps() / 1000000.0);
+        if(ready&&Clock::now()-reportStart>=std::chrono::seconds(5)) {
+            const double elapsed=std::chrono::duration<double>(Clock::now()-reportStart).count();
+            const auto decode=video_cache.decodeStats();
+            std::cout<<"Replay presented APS="<<shown<<" ("<<shown/elapsed<<"/s), skipped previews="<<skipped
+                <<", max compose+imshow ms="<<maxPresentMs
+                <<", cumulative raw-read+ISP mean/max ms="<<(decode.frames?decode.totalMs/decode.frames:0)<<'/'<<decode.maxMs
+                <<"; capture data unchanged\n";
+            shown=skipped=0;maxPresentMs=0;reportStart=Clock::now();
         }
-
-        // 读取 APS 帧
-        cv::Mat video_frame;
-        uint64_t actual_aps_fi = aps_frame_index;
-        if (video_cache.frameAt(aps_frame_index, video_frame, &actual_aps_fi)) {
-            // A stale available frame means the worker is still decoding, not EOF.
-            displayed_aps_index = actual_aps_fi;
-            if(isApsAtKnownEnd(actual_aps_fi,video_cache)) {aps_frame_index=actual_aps_fi;aps_playing=false;if(sync_enabled) evs_playing=false;}
-            last_video_frame = video_frame;
-        }
-
-        // 时间戳源
-        uint64_t aps_timestamp = 0;
-        std::string aps_ts_src;
-        Shimeta::EvsTimestamp aps_ft = video_cache.timestampAt(displayed_aps_index);
-        if (aps_ft.valid && (aps_ft.processed_timestamp != 0 || aps_ft.raw_timestamp != 0)) {
-            aps_timestamp = aps_ft.processed_timestamp != 0 ? aps_ft.processed_timestamp : aps_ft.raw_timestamp / 200;
-            aps_ts_src = "avi metadata /200";
-        } else if (has_ts_sync) {
-            aps_timestamp = ts_sync.apsVpfTvUsForVideoIndex(displayed_aps_index);
-            aps_ts_src = "timestamps.csv";
-        } else {
-            aps_timestamp = apsPlaybackTimestampUs(displayed_aps_index, video_cache.fps());
-            aps_ts_src = "frame/fps";
-        }
-        // New recordings embed the paired EVS timestamp in each AVI frame.
-        // Enable sync automatically for those files; files without tsmp retain
-        // the previous independent-playback behavior.
-        if (!sync_initialized && !video_frame.empty()) {
-            sync_enabled = aps_ft.valid &&
-                           (aps_ft.processed_timestamp != 0 || aps_ft.raw_timestamp != 0);
-            sync_initialized = true;
-        }
-        if (sync_enabled && aps_timestamp != 0)
-            // APS tsmp stores one exact EVS sensor timestamp. Keep the matched
-            // EVS frame for timestamp reporting; accumulated rendering below
-            // still spans one APS interval.
-            evs_frame_index = evs_seq.frameIndexForTimestamp(aps_timestamp, EvsStepMode::Single);
-
-        // 合成画面
-        cv::Mat evs_render = evs_step_mode == EvsStepMode::Aps
-            ? evs_seq.accumulatedFrameAt(evs_frame_index, kEvsPerApsFrame, evs_color_mode)
-            : evs_seq.frameAt(evs_frame_index, evs_color_mode);
-        uint64_t evs_ts = evs_seq.processedTimestampAt(evs_frame_index);
-
-        cv::imshow(win_name, fitPlayerCanvas(composeSideBySide(evs_render, last_video_frame,
-            aps_timestamp, aps_ts_src, displayed_aps_index, evs_ts, evs_frame_index,
-            video_cache.frameCount(), evs_seq.frameCount(),
-            evs_step_mode, evs_color_mode, sync_enabled, speed,
-            sync_enabled ? aps_playing : evs_playing, aps_playing),window_width,window_height));
-
-        // 键盘
-        int key = cv::waitKey(1) & 0xFF;
-        if (key == 27 || key == 'q' || key == 'Q') g_running = false;
-        else if (key == ' ') {
-            bool np = !(evs_playing || aps_playing);
-            evs_playing = np; aps_playing = np;
-            if(!np) aps_frame_index=displayed_aps_index;
-            if (np) {
-                if (evs_step_mode == EvsStepMode::Aps) evs_frame_index = alignEvsFrameToApsBoundary(evs_frame_index);
-                if (isEvsAtEnd(evs_frame_index, evs_seq.frameCount(), evs_step_mode)) evs_frame_index = 0;
-                if (isApsAtKnownEnd(aps_frame_index, video_cache)) aps_frame_index = 0;
-                evs_play_start = evsStartForFrame(evs_frame_index, speed);
-                aps_play_start = apsStartForFrame(aps_frame_index, speed, video_cache.fps());
-            }
-        } else if (key == 'a' || key == 'A') {
-            evs_playing = false;
-            uint64_t step = evs_step_mode == EvsStepMode::Aps ? kEvsPerApsFrame : 1;
-            if (evs_frame_index > 0)
-                evs_frame_index = clampEvsFrameIndex(evs_frame_index > step ? evs_frame_index - step : 0, evs_seq.frameCount(), evs_step_mode);
-        } else if (key == 'd' || key == 'D') {
-            evs_playing = false;
-            uint64_t step = evs_step_mode == EvsStepMode::Aps ? kEvsPerApsFrame : 1;
-            if (evs_frame_index + step < evs_seq.frameCount())
-                evs_frame_index = clampEvsFrameIndex(evs_frame_index + step, evs_seq.frameCount(), evs_step_mode);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        const int key=cv::waitKey(1)&0xff;
+        if(key==27||key=='q'||key=='Q') g_running=false;
+        else if(key==' ') g_pending_action=int(UiAction::ApsTogglePlay);
+        else if(key=='a'||key=='A') g_pending_action=int(sync_enabled?UiAction::ApsPrev:UiAction::EvsPrev);
+        else if(key=='d'||key=='D') g_pending_action=int(sync_enabled?UiAction::ApsNext:UiAction::EvsNext);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     cv::destroyAllWindows();

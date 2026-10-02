@@ -19,6 +19,8 @@ class CsvTests(unittest.TestCase):
             self.assertIn('hv_hvs_raw_to_csv', command)
             self.assertIn('hv_hvs_record', command)
             self.assertNotIn('hv_sample_player', command)
+            self.assertIn('-DCMAKE_BUILD_TYPE=Release', run.call_args_list[0].args[0])
+            self.assertEqual('Release', command[command.index('--config')+1])
 
     def test_export_uses_selected_build_and_runtime_libraries(self, _):
         with tempfile.TemporaryDirectory() as tmp:

@@ -233,7 +233,8 @@ def main(argv=None):
         csv_dir = ROOT / 'samples/cpp/hvs_raw_to_csv'
         if not all((csv_dir / name).is_file() for name in ('main.cpp', 'CMakeLists.txt', 'export_npz.py')):
             raise RuntimeError('Incomplete CSV converter sources: copy samples/cpp/hvs_raw_to_csv')
-        command = ['cmake', '-S', ROOT, '-B', build, '-DHV_TOOLKIT_ARCH=x5', '-DBUILD_SAMPLES=ON']
+        command = ['cmake', '-S', ROOT, '-B', build, '-DHV_TOOLKIT_ARCH=x5', '-DBUILD_SAMPLES=ON',
+                   '-DCMAKE_BUILD_TYPE=Release']
         if args.cross:
             command.append('-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'toolchains/toolchain-aarch64-linux-gnu.cmake'))
         command += ['-DHV_X5_NATIVE=' + ('ON' if args.with_native_live else 'OFF')]
@@ -251,7 +252,7 @@ def main(argv=None):
         if args.with_player:
             targets.append('hv_sample_player')
         check_build_targets(build, targets)
-        run(['cmake', '--build', build, '--parallel', args.jobs, '--target', *targets])
+        run(['cmake', '--build', build, '--config', 'Release', '--parallel', args.jobs, '--target', *targets])
         print('Built. Deploy the toolkit directory with lib/x5 and this build directory to X5.')
         return 0
     if args.command == 'live':

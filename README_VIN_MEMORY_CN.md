@@ -1,27 +1,90 @@
 # X5 APX003CC：双 VIN 内存录制与手动曝光
 
-## 播放器黑窗或窗口显示不全的更新
+## 回放不同步、慢播放和曝光报错修复（2026-10-02）
 
-播放器现在用后台线程解码 APS，最多缓存 8 个 BGR 帧；GUI 主线程不会为了追赶播放时间
-一次性去马赛克大量帧。窗口先绘制完整界面，再显示后台产生的帧。默认完整画布缩放到
-1280×720 范围内，使用可调整大小的窗口；侧栏、底部按钮及点击坐标一起缩放。
-播放时间改为使用 AVI 中记录的实际平均帧率，不再硬编码 30。录制文件不需要重新生成。
+此前回放代码存在三个可复现的逻辑问题：
 
-更新 `hvs.py`、`samples/cpp/player` 源码后，在板端重编译播放器（只替换 Python 不够）：
+1. 未带 `tsmp` 的原生 VIN AVI 用 `frame/fps` 相对时间，与 EVS 的绝对传感器时间直接匹配。
+   两个显示数字接近不能证明两幅图像来自同一时刻。
+2. EVS 按“四个有事件的唯一时间戳”拼图，忽略无事件子帧。现在按传输格式每四个空间
+   子帧拼一幅图，保留全空图；播放按 RAW8 头的时间推进，不再假设缓存索引就是 240 FPS。
+3. APS 后台仍对所有追赶帧做 ISP，形成积压；构建入口也未指定优化级别。现在明确用
+   Release，追赶时顺序读取原始 AVI，但仅对本次目标帧执行现有 ISP。颜色算法未修改。
+
+SYNC 默认开启，EVS 根据**实际展示的 APS 帧**选择相同时段；慢解码时保留上一对图像，
+下一次追赶墙钟时间。暂停、逐帧和倍速共同控制两路；SYNC 下任一路前后按钮及 a/d 均按
+APS 帧步进，EVS 的 1/8 / 1X 按钮控制单图 / 一个 APS 周期的时间累积。
+FREE 下两路独立播放，EVS 按自身时间戳推进。初始化首帧不计入播放时钟。
+跳过的是回放预览，不删除、复制或插值录制帧；可暂停逐帧检查全部 APS 帧。
+
+时间来源按以下顺序使用：
+
+- AVI 内有效 `tsmp`：已有录制链路记录的配对传感器时间。
+- 原生 VIN 的 `vin.frames.jsonl`：用 EVS 包末子帧时间与该包 `host_ns` 建立中位数时钟偏移，
+  APS 使用同一主机的 `host_ns` 映射，界面标注 `host bridge / approx`。这只是接收时间
+  近似同步，有缓冲、传输、曝光读出及调度延迟；不能声称逐帧硬件同步。日志打印偏移跨度。
+- 旧 `timestamps.csv`：桥接到 EVS 时钟后再匹配，不直接混用 VPF 和传感器时间。
+- 没有上述信息：明确警告 `recording starts aligned; original clock offset UNKNOWN`，
+  仅将两路文件起点对齐，界面标注 `start aligned / approx`，无法恢复丢失的真实时间偏移。
+
+请保持同一会话的 `events.raw`、`aps.avi`、`vin.frames.jsonl` 在同一目录，勿混用文件。
+原生元数据数量不匹配或时间倒退会报错，不静默退回名义帧率。已有完整 VIN 录像不用重录。
+
+**重新配置并编译两个目标，只替换 Python 或运行旧的 build 命令不够：**
 
 ```bash
 cd /app/shimetapi_hybrid_vision_toolkit
-cmake --build out/x5/hvs-build --parallel 2 --target hv_sample_player
-python3 hvs.py play --output /app/recordings/vin_01
-
-# 较小桌面 / X11 转发时，可进一步限制画布大小
-python3 hvs.py play --output /app/recordings/vin_01 --window-width 1024 --window-height 600
+# 平台样例目录须指向这块板实际使用的 3.4.1 样例，按部署位置调整
+python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
+grep '^CMAKE_BUILD_TYPE:' out/x5/hvs-build/CMakeCache.txt
+sha256sum out/x5/hvs-build/samples/cpp/player/hv_sample_player out/x5/hvs-build/samples/cpp/hvs_record/hv_hvs_record_vin
+python3 hvs.py play --output /app/recordings/vin_01 --window-width 1280 --window-height 720
 ```
 
-若当前构建目录没有 player 目标，先运行下方完整的 `hvs.py build --with-vin-record --with-player`。
-AT-SPI accessibility bus 警告本身不能证明解码或窗口失败。新代码修正了可确认的同步解码
-阻塞和固定窗口尺寸问题；实际 MobaXterm/X11 显示仍需板端复测。本地测试覆盖慢解码下
-非阻塞取帧、8 帧容量、缓存淘汰后倒退、完整画布和缩放后的按钮命中，并编译检查主程序。
+预期构建类型为 Release。每 5 秒回放日志报告实际展示 APS 数、跳过预览数、
+`raw-read+ISP` 耗时及 `compose+imshow` 耗时。若仍慢，用这些耗时区分解码/处理和 X11
+传输；不要用 AVI 头的 29.79 FPS 证明显示已达到该速度。没有板端/X11 实测结果。
+窗口仍先绘制完整界面，默认适配 1280×720，底部按钮和侧栏随画布同比缩放。
+
+### 曝光命令为何报 chip identity mismatch
+
+手动控制之前的芯片检查错误地分别读了 `0x3428` 和 `0x3429` 两个 data8 寄存器。
+本地 3.4.1 官方 `vp_sensors/vp_sensors.c` 的 `read_chip_id` 对 APX003CC 调用的是
+`vp_i2c_read_reg16_data16`：写入地址 `0x3428` 后，在**同一次 I2C_RDWR 的 repeated-start
+读消息中取两个字节**，按大端合并，与 `0x0808` 比较。当前实现已与它一致。
+曝光/增益寄存器仍为 reg16/data8；非强占访问、总线/地址核对和错误中止仍保留。
+检查失败会打印实际 ID、期望 ID、总线、地址，且不会继续写曝光。
+此修复纠正了事务协议差异，实际板端读回及亮度响应仍需复测。
+
+```bash
+# 使用新目录，避免上次失败留下的目录与新会话混用
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/bright_100_fixed \
+  --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
+python3 hvs.py play --output /app/recordings/bright_100_fixed
+```
+
+上述 bus 6 / 7-bit addr 0x3c 对应用户当前板端日志，程序还会核对实际选中的传感器配置。
+正常检查日志应有 `APX003CC identity reg16/data16: 0x808`，随后必须通过曝光写入、
+读回和持续保持检查。不要用关闭身份检查或强制抢占 I2C 的办法绕过失败。
+
+### 偏绿图像：使用已有离线工具，不继续改播放器颜色代码
+
+这次没有修改 `aps_color.h`、`common/aps_core.h` 或默认 Bayer/WB 参数。现有软件预览
+没有完成实际 CFA、白平衡和 CCM 标定，不能保证可靠色彩。可使用工程已有
+`tools/aps_isp_tuner.py` 离线处理，支持黑电平、灰卡白平衡、去马赛克、CCM 和 gamma。
+先确认 summary 中 `gray8_frames == aps_frames > 0`，再提取保留 Bayer 的 AVI Y 平面：
+
+```bash
+python3 tools/aps_isp_tuner.py extract --avi /app/recordings/vin_01/aps.avi --frame 30 --width 1632 --height 1224 --preserved-bayer --out frame30.raw
+python3 tools/aps_isp_tuner.py dump-config --out isp_offline.json
+# 编辑 JSON：对白纸/灰卡用 wb_mode="patch"，wb_patch=[x,y,w,h] 为实际灰卡区域；
+# 黑电平来自遮光帧，CCM 来自色卡标定，不直接套用他人的数值。
+python3 tools/aps_isp_tuner.py process --input frame30.raw --width 1632 --height 1224 --bayer gbrg --config isp_offline.json --out frame30_isp.png --with-baseline
+```
+
+`gbrg` 仍是现有预设，并非本次确认的 CFA；需用已知颜色场景核实。
+该提取路径只有 RAW10>>2 后的 8-bit 精度，不能把完整 `aps.vin.bin` 直接当作这个工具的
+8-bit 输入。保留原始 10-bit 文件用于后续标定；本次不增加或更改 ISP 算法。
 
 本次改动直接接入 `hvs.py record --x5-vin-bypass`。该参数现在启动
 `hv_hvs_record_vin`，不再启动旧的 patched Camera SDK。需要重新构建，不能只更新

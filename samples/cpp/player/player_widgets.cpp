@@ -34,6 +34,7 @@ bool VideoReader::open(const std::string& path, double fallback_fps) {
     total_frames_ = reader_->apsFrameCount();
     fallback_fps_ = fallback_fps > 0.0 ? fallback_fps : 30.0;
     current_index_ = 0;
+    processed_ = 0;
     return true;
 }
 double VideoReader::fps() const { return fps_ > 0.0 ? fps_ : fallback_fps_; }
@@ -46,18 +47,18 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
         Shimeta::Frame f;
         Shimeta::EvsTimestamp ts;
         if (!reader_->readApsFrame(f, &ts)) return false;
-        try { current_frame_ = isp_.process(f); }
+        if(current_index_++ != target_index) continue; // Skip obsolete preview work, retain sequential IO.
+        try { current_frame_ = isp_.process(f); ++processed_; }
         catch(const std::exception& e) { std::cerr << "APS decode: " << e.what() << std::endl; return false; }
-        if(current_index_<8) {
+        if(target_index<8) {
             const auto mean=cv::mean(current_frame_);
-            std::cout << "APS replay frame=" << current_index_
+            std::cout << "APS replay frame=" << target_index
                       << " bayer=" << isp_.pattern
                       << " ISP-output-residual-WB=" << (isp_.ispOutputCorrection?"on":"off")
                       << " output_mean_BGR=" << mean[0] << ',' << mean[1] << ',' << mean[2]
                       << " | " << isp_.status() << std::endl;
         }
         current_timestamp_ = ts;
-        ++current_index_;
     }
     frame = current_frame_.clone();
     if (timestamp) *timestamp = current_timestamp_;
@@ -68,7 +69,7 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
 // ApsFrameCache
 // ============================================================================
 bool ApsFrameCache::open(const std::string& path, double fallback_fps) {
-    shutdown();frames_.clear();path_=path;quitting_=false;exhausted_=false;
+    shutdown();frames_.clear();stats_={};path_=path;quitting_=false;exhausted_=false;
     if(!reader_.open(path,fallback_fps)) return false;
     fps_=reader_.fps();total_=reader_.totalFrameCount();requested_=0;pending_=true;
     worker_=std::thread(&ApsFrameCache::decodeLoop,this);
@@ -82,26 +83,30 @@ void ApsFrameCache::shutdown() {
 void ApsFrameCache::decodeLoop() {
     uint64_t next=0;
     for(;;) {
-        bool rewind=false;
+        bool rewind=false;uint64_t target=0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock,[&]{return quitting_||pending_;});
             if(quitting_) return;
             if(frames_.count(requested_)) {pending_=false;continue;}
-            rewind=requested_<next;
+            target=requested_;rewind=target<next;
             if(rewind) {frames_.clear();exhausted_=false;next=0;}
             if(exhausted_) {pending_=false;continue;}
         }
         cv::Mat frame;Shimeta::EvsTimestamp timestamp{};bool ok=false;
+        const auto started=std::chrono::steady_clock::now();
         try {
             if(rewind) {reader_.setIsp(isp_);if(!reader_.open(path_,fps_)) throw std::runtime_error("Cannot rewind AVI");}
-            // Cancellation and requests are checked between individual frames.
-            ok=reader_.readFrameAt(next,frame,&timestamp);
+            // Coalesce pending preview requests. Sequential IO may still read
+            // intervening AVI frames, but only target receives ISP processing.
+            ok=reader_.readFrameAt(target,frame,&timestamp);
         } catch(const std::exception& e) {std::cerr<<"APS playback decode: "<<e.what()<<std::endl;}
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if(!ok) {exhausted_=true;total_=next;pending_=false;continue;}
-            frames_[next]={std::move(frame),timestamp};++next;
+            const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+            ++stats_.frames;stats_.totalMs+=ms;stats_.maxMs=std::max(stats_.maxMs,ms);
+            frames_[target]={std::move(frame),timestamp};next=target+1;
             while(frames_.size()>8) frames_.erase(frames_.begin());
             pending_=!frames_.count(requested_);
         }
@@ -111,7 +116,7 @@ double ApsFrameCache::fps() const { return fps_; }
 size_t ApsFrameCache::frameCount() const {
     std::lock_guard<std::mutex> lock(mutex_);return size_t(total_);
 }
-bool ApsFrameCache::frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index) {
+bool ApsFrameCache::frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index, Shimeta::EvsTimestamp* timestamp) {
     std::lock_guard<std::mutex> lock(mutex_);
     requested_=total_?std::min(index,total_-1):index;
     pending_=true;wake_.notify_one();
@@ -119,6 +124,7 @@ bool ApsFrameCache::frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_ind
     auto it=frames_.upper_bound(requested_);
     if(it!=frames_.begin()) --it;
     if (actual_index) *actual_index = it->first;
+    if (timestamp) *timestamp = it->second.timestamp;
     frame = it->second.frame;
     return !frame.empty();
 }
@@ -141,59 +147,39 @@ bool EvsFrameSequence::open(const std::string& filename) {
     width_ = 768;
     height_ = 608;
 
+    // Group transport subframes, including empty ones. Counting unique EVENT
+    // timestamps loses empty subframes and changes both geometry and duration.
+    frames_.clear();processed_timestamps_.clear();packet_ends_.clear();
     Shimeta::codec::MipiRaw8Decoder decoder;
-    std::vector<Shimeta::EventCD> all_events;
-    int packet_count = 0;
-    size_t total_bytes = 0;
-    Shimeta::Frame f;
-    while (reader.readEvsPacket(f)) {
-        std::vector<Shimeta::EventCD> packet_events;
-        decoder.Decode(f.evs.data, f.evs.size, packet_events);
-        all_events.insert(all_events.end(), packet_events.begin(), packet_events.end());
-        total_bytes += f.evs.size;
-        ++packet_count;
-    }
-    std::cout << "RAW8 data size: " << total_bytes << " bytes" << std::endl;
-    std::cout << "Decoded " << packet_count << " packets, "
-              << all_events.size() << " events total" << std::endl;
-
-    if (all_events.empty()) {
-        std::cerr << "事件文件解码后为空" << std::endl;
-        return false;
-    }
-
-    // 按时间窗口（4 个唯一时间戳 = 1 EVS 帧）累积为极性帧
-    frames_.clear();
-    processed_timestamps_.clear();
-    cv::Mat frame(height_, width_, CV_8UC1, cv::Scalar(0));
-    int64_t current_ts = all_events.front().t;
-    uint64_t unique_ts_in_frame = 1;
-    uint64_t frame_processed_timestamp = 0;
-    bool frame_has_timestamp = false;
-
-    for (const auto& e : all_events) {
-        if (e.t != current_ts) {
-            if (unique_ts_in_frame >= kEvsSubframesPerFrame) {
-                frames_.push_back(frame.clone());
-                processed_timestamps_.push_back(frame_has_timestamp ? frame_processed_timestamp : uint64_t(current_ts));
-                frame.setTo(cv::Scalar(0));
-                frame_processed_timestamp = 0;
-                frame_has_timestamp = false;
-                unique_ts_in_frame = 0;
+    Shimeta::Frame f;size_t packets=0,events=0;
+    constexpr size_t subBytes=Shimeta::codec::MipiRaw8Layout::kSubframeBytes;
+    while(reader.readEvsPacket(f)) {
+        if(f.evs.size%(4*subBytes)) {std::cerr<<"Incomplete EVS transport group\n";return false;}
+        uint64_t packetEnd=0;
+        for(size_t offset=0;offset<f.evs.size;offset+=4*subBytes) {
+            uint64_t first=0;
+            for(size_t sub=0;sub<4;++sub) {
+                uint64_t word=0;std::memcpy(&word,f.evs.data+offset+sub*subBytes,8);
+                if((uint32_t(word)&0xffffffu)!=Shimeta::codec::MipiRaw8Layout::kHeaderMask) {
+                    std::cerr<<"Invalid EVS subframe header, packet "<<packets<<"\n";return false;
+                }
+                const uint64_t ts=((word>>24)&0xffffffffffULL)/200;
+                if(sub==0) first=ts;
+                packetEnd=ts;
             }
-            ++unique_ts_in_frame;
-            current_ts = e.t;
+            if(!processed_timestamps_.empty()&&first<processed_timestamps_.back()) {
+                std::cerr<<"EVS timestamp reset/wrap: cannot build monotonic replay timeline\n";return false;
+            }
+            std::vector<Shimeta::EventCD> decoded;
+            decoder.Decode(f.evs.data+offset,4*subBytes,decoded,4);
+            cv::Mat frame(height_,width_,CV_8UC1,cv::Scalar(0));
+            for(const auto& e:decoded) if(uint32_t(e.x)<width_&&uint32_t(e.y)<height_)
+                frame.at<uint8_t>(int(e.y),int(e.x))=e.polarity?1:2;
+            events+=decoded.size();frames_.push_back(std::move(frame));processed_timestamps_.push_back(first);
         }
-        if (!frame_has_timestamp) {
-            frame_processed_timestamp = uint64_t(e.t);
-            frame_has_timestamp = true;
-        }
-        if (uint32_t(e.x) < width_ && uint32_t(e.y) < height_)
-            frame.at<uint8_t>(int(e.y), int(e.x)) = e.polarity ? 1 : 2;
+        packet_ends_.push_back(packetEnd);++packets;
     }
-    frames_.push_back(frame.clone());
-    processed_timestamps_.push_back(frame_has_timestamp ? frame_processed_timestamp : uint64_t(current_ts));
-
+    std::cout<<"EVS packets="<<packets<<" events="<<events<<" (empty subframes retained)\n";
     std::cout << "EVS frames cached: " << frames_.size() << std::endl;
     return !frames_.empty();
 }
@@ -304,6 +290,17 @@ uint64_t TimestampSyncMap::apsVpfTvUsForVideoIndex(uint64_t vi) const {
     auto it = std::lower_bound(aps_.begin(), aps_.end(), vi,
         [](const ApsEntry& e, uint64_t i) { return e.avi_frame_index < i; });
     return (it == aps_.end() ? aps_.back() : *it).vpf_tv_us;
+}
+
+uint64_t TimestampSyncMap::apsSensorUs(uint64_t vi) const {
+    if(!enabled_||aps_.empty()) return 0;
+    auto it=std::lower_bound(aps_.begin(),aps_.end(),vi,[](const ApsEntry& e,uint64_t i){return e.avi_frame_index<i;});
+    const auto& a=it==aps_.end()?aps_.back():*it;
+    if(aps_has_evs_raw_ts_) return a.evs_processed_ts_us;
+    auto ev=std::lower_bound(evs_.begin(),evs_.end(),a.vpf_tv_us,[](const EvsEntry& e,uint64_t t){return e.vpf_tv_us<t;});
+    if(ev==evs_.end()) ev=evs_.end()-1;
+    const int64_t t=int64_t(ev->evs_ts_us)+int64_t(a.vpf_tv_us)-int64_t(ev->vpf_tv_us);
+    return uint64_t(std::max<int64_t>(0,t));
 }
 
 /** @brief CSV 行按逗号分割。 */
@@ -566,7 +563,7 @@ void drawSidebar(cv::Mat& canvas, int x, int height,
     drawPixelText(canvas, left, y - 14, "TIMESTAMPS", accent, 2); y += 50;
     drawBlock("APS timestamp (us)", std::to_string(aps_ts), "source: " + aps_ts_src);
     drawBlock("APS frame", std::to_string(aps_fi), "");
-    drawBlock("EVS timestamp (us)", std::to_string(evs_ts), "source: raw EVT2");
+    drawBlock("EVS timestamp (us)", std::to_string(evs_ts), "source: RAW8 sensor");
     drawBlock("EVS frame", std::to_string(evs_fi), "");
 
     y += 6;

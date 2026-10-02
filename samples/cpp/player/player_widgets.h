@@ -78,6 +78,7 @@ public:
     void setIsp(const ApsIsp& isp) { isp_ = isp; }
     double fps() const;
     uint64_t totalFrameCount() const;
+    uint64_t processedCount() const {return processed_;}
     bool readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::EvsTimestamp* timestamp = nullptr);
 private:
     ApsIsp isp_;
@@ -86,6 +87,7 @@ private:
     uint64_t total_frames_ = 0, current_index_ = 0;
     cv::Mat  current_frame_;
     Shimeta::EvsTimestamp current_timestamp_{};
+    uint64_t processed_=0;
 };
 
 /**
@@ -95,12 +97,15 @@ private:
  */
 class ApsFrameCache {
 public:
+    struct DecodeStats {uint64_t frames=0;double totalMs=0,maxMs=0;};
+    DecodeStats decodeStats() const {std::lock_guard<std::mutex> lock(mutex_);return stats_;}
     ~ApsFrameCache();
     void setIsp(const ApsIsp& isp) { isp_=isp; reader_.setIsp(isp); }
     bool open(const std::string& path, double fallback_fps);
     double fps() const;
     size_t frameCount() const;
-    bool frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index = nullptr);
+    bool frameAt(uint64_t index, cv::Mat& frame, uint64_t* actual_index = nullptr,
+                 Shimeta::EvsTimestamp* timestamp = nullptr);
     Shimeta::EvsTimestamp timestampAt(uint64_t index) const;
     size_t cachedFrameCount() const;
 private:
@@ -117,6 +122,7 @@ private:
     uint64_t requested_=0, total_=0;
     double fps_=30;
     bool pending_=false, quitting_=false, exhausted_=false;
+    DecodeStats stats_;
 };
 
 /**
@@ -128,6 +134,7 @@ private:
 class EvsFrameSequence {
 public:
     bool open(const std::string& filename);
+    const std::vector<uint64_t>& packetEnds() const {return packet_ends_;}
     size_t frameCount() const;
     cv::Mat frameAt(size_t index, EvsColorMode mode) const;
     cv::Mat accumulatedFrameAt(size_t index, size_t count, EvsColorMode mode) const;
@@ -138,6 +145,7 @@ private:
     cv::Mat renderPolarityFrame(const cv::Mat& polarity, EvsColorMode mode) const;
     uint32_t width_ = 0, height_ = 0;
     std::vector<cv::Mat>  frames_;                   ///< 每帧极性图（0=空/1=ON/2=OFF）
+    std::vector<uint64_t> packet_ends_;
     std::vector<uint64_t> processed_timestamps_;    ///< 每帧处理时间戳(us)
 };
 
@@ -152,6 +160,7 @@ public:
     bool enabled() const;
     uint64_t videoIndexForEvsTs(uint64_t evs_ts_us) const;
     uint64_t apsVpfTvUsForVideoIndex(uint64_t vi) const;
+    uint64_t apsSensorUs(uint64_t vi) const;
 private:
     struct EvsEntry { uint64_t evs_ts_us = 0, vpf_tv_us = 0; };
     struct ApsEntry { uint64_t avi_frame_index = 0, vpf_tv_us = 0, evs_raw_ts = 0, evs_processed_ts_us = 0; };

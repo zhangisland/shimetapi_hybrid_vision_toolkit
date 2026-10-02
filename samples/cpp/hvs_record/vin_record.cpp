@@ -101,17 +101,17 @@ public:
    if(fd>=0) ::close(fd); if(lockFd>=0) ::close(lockFd);
 #endif
  }
- uint8_t read(uint16_t reg) {
+ void readBytes(uint16_t reg,uint8_t* values,uint16_t count) {
 #ifdef __linux__
-   uint8_t bytes[]={uint8_t(reg>>8),uint8_t(reg)},value=0;
-   i2c_msg msgs[]={{uint16_t(address),0,2,bytes},{uint16_t(address),I2C_M_RD,1,&value}};
+   uint8_t bytes[]={uint8_t(reg>>8),uint8_t(reg)};
+   i2c_msg msgs[]={{uint16_t(address),0,2,bytes},{uint16_t(address),I2C_M_RD,count,values}};
    i2c_rdwr_ioctl_data req{msgs,2};
    if(ioctl(fd,I2C_RDWR,&req)!=2) throw std::runtime_error("I2C read failed at "+std::to_string(reg));
-   return value;
 #else
    throw std::runtime_error("No I2C");
 #endif
  }
+ uint8_t read(uint16_t reg) {uint8_t value=0;readBytes(reg,&value,1);return value;}
  void write(uint16_t reg,uint8_t value) {
 #ifdef __linux__
    uint8_t bytes[]={uint8_t(reg>>8),uint8_t(reg),value};
@@ -301,7 +301,8 @@ static int run(const Options& o) {
    if(configuredBus<0||o.bus!=configuredBus) throw std::runtime_error("Requested I2C bus differs from selected VIN vcon device-tree bus, or bus is unavailable");
    sensor=std::make_unique<SensorIO>(o.bus,o.address);
    // The exact pair's vp_sensors chip_id is 0x0808 at 0x3428.
-   if(((unsigned(sensor->read(0x3428))<<8)|sensor->read(0x3429))!=0x0808) throw std::runtime_error("APX003CC chip identity mismatch");
+   const auto chipId=apx::verifyIdentity(*sensor,o.bus,o.address);
+   std::cout<<"APX003CC identity reg16/data16: 0x"<<std::hex<<chipId<<std::dec<<std::endl;
    vts=(int(sensor->read(0x0160))<<8)|sensor->read(0x0161);
    regs=apx::apply(*sensor,o.lines,o.gain);
    std::cout<<"APS control after both streams started: lines="<<o.lines<<" gain_dB="<<(o.gain>=0?apx::gainIndex(o.gain)*0.375:-1)<<" VTS="<<vts<<" registers verified; NOT per-frame exposure\n";

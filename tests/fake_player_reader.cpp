@@ -3,11 +3,12 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <cstring>
 namespace fake_player {std::atomic<int> delayMs{30},reads{0};}
 namespace Shimeta::io {
 HybridReader::HybridReader()=default;
 HybridReader::~HybridReader()=default;
-bool HybridReader::open(const std::string&,const std::string&) {next_aps_index_=0;return true;}
+bool HybridReader::open(const std::string& evs,const std::string&) {next_aps_index_=0;evs_open_=evs=="synthetic";return true;}
 double HybridReader::apsFps() const {return 29.79;}
 uint32_t HybridReader::apsFrameCount() const {return 24;}
 bool HybridReader::readApsFrame(Frame& f,EvsTimestamp* ts) {
@@ -22,7 +23,17 @@ bool HybridReader::readApsFrame(Frame& f,EvsTimestamp* ts) {
     if(ts) {*ts={};ts->valid=true;ts->processed_timestamp=1000+next_aps_index_;}
     ++next_aps_index_;return true;
 }
-bool HybridReader::readEvsPacket(Frame&,size_t) {return false;}
+bool HybridReader::readEvsPacket(Frame& f,size_t) {
+    if(!evs_open_||next_aps_index_>=2) return false;
+    const size_t size=32*codec::MipiRaw8Layout::kSubframeBytes;
+    f.evs_owner.reset(new uint8_t[size]{});f.evs={f.evs_owner.get(),size};
+    for(size_t sub=0;sub<32;++sub) {
+        const uint64_t ts=12000000+next_aps_index_*32000+sub*1000;
+        const uint64_t word=((ts*200)<<24)|codec::MipiRaw8Layout::kHeaderMask;
+        std::memcpy(f.evs_owner.get()+sub*codec::MipiRaw8Layout::kSubframeBytes,&word,8);
+    }
+    ++next_aps_index_;return true;
+}
 }
 namespace Shimeta::codec {
 size_t MipiRaw8Decoder::Decode(const uint8_t*,size_t,std::vector<EventCD>&,int) {return 0;}
