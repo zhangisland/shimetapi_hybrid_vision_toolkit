@@ -233,19 +233,14 @@ summary 分别记录请求、量化后提交、寄存器快照/保持检查、VT
 
 ```bash
 # A: 取帧、缓存同步、统计后立即释放，不保存负载
-python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_A \
-  --seconds 5 --warmup 1 --max-mib 1024 --diagnostic receive
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_A --seconds 5 --warmup 1 --max-mib 1024 --diagnostic receive
 # B: 复制进有界 arena，结束后丢弃，仅保存诊断统计
-python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_B \
-  --seconds 5 --warmup 1 --max-mib 1024 --diagnostic copy
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_B --seconds 5 --warmup 1 --max-mib 1024 --diagnostic copy
 # C: 旧版 SDK + tmpfs（诊断对照，不满足新内存热路径要求）
-python3 hvs.py record --legacy-sdk-bypass --storage memory --output /app/recordings/diag_C \
-  --seconds 5 --max-mib 1024
+python3 hvs.py record --legacy-sdk-bypass --storage memory --output /app/recordings/diag_C --seconds 5 --max-mib 1024
 # D: 新的完整两路录制
-python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_D \
-  --seconds 5 --warmup 1 --max-mib 1024
-python3 tools/apx003cc_diagnostics/check_vin_recording.py \
-  /app/recordings/diag_A /app/recordings/diag_B /app/recordings/diag_D
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/diag_D --seconds 5 --warmup 1 --max-mib 1024
+python3 tools/apx003cc_diagnostics/check_vin_recording.py /app/recordings/diag_A /app/recordings/diag_B /app/recordings/diag_D
 ```
 
 C 的原实现没有独立预热窗口，不能直接把总帧数与 A/B/D 作同窗口验收；先核实其日志
