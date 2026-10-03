@@ -53,7 +53,7 @@ static int previewVin(const Options& o) {
  Shimeta::codec::MipiRaw8Decoder decoder;
  const auto begin=ns();auto report=begin,verify=begin;uint64_t shown=0,last=0,lastEvs=0,dropped=0;
  std::vector<uint8_t> raw(3995136),eventBytes(1048576),gray(1632*1224);
- double rawMean=0,rawSaturation=0;
+ double rawMean=0,rawSaturation=0,evsRate=0;uint64_t evsTotal=0,evsRateMark=0,evsRateTime=begin;
  cv::Mat eventView(608,768,CV_8UC3,cv::Scalar(0)),apsView;
  cv::namedWindow("HVS VIN preview - NO RECORDING",cv::WINDOW_NORMAL);
  cv::resizeWindow("HVS VIN preview - NO RECORDING",o.previewWidth,o.previewWidth/2);
@@ -70,17 +70,17 @@ static int previewVin(const Options& o) {
    Shimeta::Frame f{};f.width=1632;f.height=1224;f.format=Shimeta::PixelFormat::Gray8;f.aps={gray.data(),gray.size()};apsView=isp.process(f);
    bool freshEvent=false;
    {std::lock_guard<std::mutex> hold(slots[0].mutex);evsHost=slots[0].host;if(slots[0].sequence!=lastEvs){eventBytes=slots[0].bytes;lastEvs=slots[0].sequence;freshEvent=true;}}
-   if(freshEvent){std::vector<Shimeta::EventCD> events;decoder.Decode(eventBytes.data(),eventBytes.size(),events);eventView.setTo(cv::Scalar(0));for(auto e:events)if(unsigned(e.x)<768&&unsigned(e.y)<608)eventView.at<cv::Vec3b>(e.y,e.x)=e.polarity?cv::Vec3b(255,0,0):cv::Vec3b(0,0,255);}
+   if(freshEvent){std::vector<Shimeta::EventCD> events;decoder.Decode(eventBytes.data(),eventBytes.size(),events);evsTotal+=events.size();eventView.setTo(cv::Scalar(0));for(auto e:events)if(unsigned(e.x)<768&&unsigned(e.y)<608)eventView.at<cv::Vec3b>(e.y,e.x)=e.polarity?cv::Vec3b(255,0,0):cv::Vec3b(0,0,255);}
    const int w=o.previewWidth/2,h=w*3/4;cv::Mat canvas(h+80,w*2,CV_8UC3,cv::Scalar(18,18,18)),left,right;
    cv::resize(eventView,left,{w,h});cv::resize(apsView,right,{w,h});left.copyTo(canvas(cv::Rect(0,0,w,h)));right.copyTo(canvas(cv::Rect(w,0,w,h)));
    std::ostringstream title;title<<"NO RECORDING | RAW mean="<<double(sum)/(gray.size()-1)<<" sat="<<100.*saturated/(gray.size()-1)<<"% (first word excluded)";
    cv::putText(canvas,title.str(),{8,h+25},cv::FONT_HERSHEY_SIMPLEX,.42,{255,255,255},1);
-   std::ostringstream timing;timing<<"Latest APS/EVS host delta="<<(int64_t(apsHost)-int64_t(evsHost))/1e6<<" ms; approximate, preview drops allowed";
+   std::ostringstream timing;timing<<"Latest APS/EVS host delta="<<(int64_t(apsHost)-int64_t(evsHost))/1e6<<" ms; EVS events/s="<<uint64_t(evsRate);
    cv::putText(canvas,timing.str(),{8,h+50},cv::FONT_HERSHEY_SIMPLEX,.42,{255,255,255},1);
    cv::imshow("HVS VIN preview - NO RECORDING",canvas);++shown;
   }
   if(ns()-verify>=1000000000ULL){if(sensor)apx::verify(*sensor,regs);verify=ns();}
-  if(ns()-report>=1000000000ULL){std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<std::endl;report=ns();}
+  if(ns()-report>=1000000000ULL){const auto tick=ns();evsRate=double(evsTotal-evsRateMark)*1e9/double(tick-evsRateTime);evsRateMark=evsTotal;evsRateTime=tick;std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<" evs_events_per_s="<<uint64_t(evsRate)<<std::endl;report=ns();}
   if(ns()-begin>uint64_t(o.timeout*1e9)&&(!counts[0]||!counts[1]))throw std::runtime_error("Preview stream absent");
   const int key=cv::waitKey(1)&255;if(key==27||key=='q')break;
  }

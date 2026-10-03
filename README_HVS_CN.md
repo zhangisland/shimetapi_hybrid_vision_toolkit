@@ -6,6 +6,8 @@
 ```bash
 git clone https://github.com/zhangisland/shimetapi_hybrid_vision_toolkit # 我修改过的
 
+# git config core.fileMode false  # git 不追踪文件权限的修改
+
 # aarch64 交叉；工具链与 SDK 已就绪即可, 会构建一些自带的sample
 ./run.sh build x5 
 
@@ -18,6 +20,21 @@ python3 hvs.py build --with-vin-record --with-player --platform-samples /app/mul
 
 
 ## 2. 数据采集流程
+
+### 2.0 显示实时画面 preview
+
+```bash
+# 1. 录制 record
+cd /app/shimetapi_hybrid_vision_toolkit
+
+## 现在是通过 --storage 先写到memory 再转到disk, 一段5s 150帧的avi需要大约110s才能转化完存储到硬盘, 有点耽误时间
+## 通过 --aps-gain-db 调整曝光增益, 范围 0-12 dB
+python3 hvs.py record --x5-vin-bypass --storage memory --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-gain-db 0  --output /app/recordings/gain0_new
+
+## 或者是通过 scripts/record.sh
+# bash scripts/record.sh --output /app/recordings/gain0_new --seconds 5
+```
+
 
 ### 2.1 录制 record
 ```bash
