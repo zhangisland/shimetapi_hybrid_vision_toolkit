@@ -102,6 +102,7 @@ def main():
     p.add_argument('--i2c-address',type=lambda x:int(x,0),default=0x3c)
     p.add_argument('--gain-db',choices=['auto','0','24'],default='auto')
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--standby',action='store_true',help='Set candidate while 0x340C=0, then restart stream; diagnostic only')
     args=p.parse_args()
     if any(v<0 or v>255 for v in args.values):p.error('values must be bytes')
     if not os.environ.get('DISPLAY'):p.error('Run in a desktop/X11 session')
@@ -128,8 +129,12 @@ def main():
             stable(baseline,preview.measure(settle=.5))
             guard=bus.snapshot()
             if guard['0x3502']!=factory['0x3502'] or guard['0x3602']!=(255 if gain==0 else 16):raise RuntimeError('Mode/gain guard changed')
-            bus.write(args.register,value);bus.latch();immediate=bus.read(args.register)
-            emit('write_audit',{'requested':value,'readback':immediate,'register':hex(args.register)})
+            if args.standby:bus.write(0x340c,0);time.sleep(.1)
+            try:
+                bus.write(args.register,value);bus.latch();immediate=bus.read(args.register)
+            finally:
+                if args.standby:bus.write(0x340c,1)
+            emit('write_audit',{'requested':value,'readback':immediate,'register':hex(args.register),'standby':args.standby})
             measured=preview.measure();after=bus.snapshot()
             trial={'requested':value,'readback':immediate,'after':after,'measurement':measured}
             result['trials'].append(trial);emit('candidate',trial)
@@ -146,7 +151,9 @@ def main():
     finally:
         if preview:
             if original is not None and preview.proc.poll() is None:
-                try:bus.write(args.register,original);bus.latch();bus.gain(0)
+                try:
+                    if args.standby:bus.write(0x340c,1)
+                    bus.write(args.register,original);bus.latch();bus.gain(0)
                 except Exception as e:result['cleanup_error']=str(e)
             preview.stop()
         (args.output/'result.json').write_text(json.dumps(result,indent=2)+'\n')
