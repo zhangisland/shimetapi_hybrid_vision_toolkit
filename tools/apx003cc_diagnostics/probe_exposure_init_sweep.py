@@ -99,6 +99,8 @@ class Preview:
 
     def _pump(self):
         for line in self.proc.stdout:
+            sys.stderr.write("[preview] " + line)
+            sys.stderr.flush()
             m = re.search(r"raw_mean=([0-9.]+).*raw_sample_sequence=(\d+)", line)
             if m:
                 seq = int(m.group(2))
@@ -112,6 +114,19 @@ class Preview:
     def measure(self, settle, window):
         self.samples.clear()
         self.last_seq = -1
+        # Phase 1: wait for the FIRST fresh frame. Sensor init (search + dual VIN
+        # open) takes several seconds; a fixed settle window counted from process
+        # start closes before the first frame arrives and yields None.
+        first_deadline = time.monotonic() + 30.0
+        while time.monotonic() < first_deadline:
+            if not self.alive():
+                return None
+            if self.samples:
+                break
+            time.sleep(0.1)
+        if not self.samples:
+            return None
+        # Phase 2: settle, then average the last `window` seconds of samples.
         deadline = time.monotonic() + settle + window
         while time.monotonic() < deadline:
             if not self.alive():
