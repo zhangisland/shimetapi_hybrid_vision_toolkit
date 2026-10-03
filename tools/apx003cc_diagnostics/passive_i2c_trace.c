@@ -24,27 +24,40 @@
  * Build (RDK X5 board, aarch64 gcc):
  *   gcc -shared -fPIC -O2 -o passive_i2c_trace.so passive_i2c_trace.c -ldl -lpthread
  *
- * Run (preview uses --no-verify and NO gain arg, so the toolkit itself never
- * calls the vendor write path; every captured write is the vendor stack's own):
+ * Run:
  *   export I2C_TRACE_LOG=/tmp/i2c_trace.log
- *   LD_PRELOAD=./tools/apx003cc_diagnostics/passive_i2c_trace.so \
- *     python3 hvs.py live --x5-vin-bypass -- --preview-width 960 --no-verify
- *   # ~15s covers power-on + init + steady state, then Ctrl+C
+ *   LD_PRELOAD=$PWD/tools/apx003cc_diagnostics/passive_i2c_trace.so \
+ *     python3 hvs.py live --x5-vin-bypass -- --preview-width 960 --no-verify \
+ *     2>&1 | tee /tmp/preview_terminal.log
+ *   # ~15s, then Ctrl+C
  *
- * Log format (parsed by parse_i2c_trace.py):
- *   I2C_WR t=SEC.NSEC bus=N width=N addr=0xAA reg=0xRRRR value=0xVV ret=N
+ * Diagnostics (decides whether write8 or a block-write symbol is the real path):
+ *   - "APX_TRACE_LOADED" on stderr  => LD_PRELOAD took effect, .so was loaded.
+ *   - "APX_TRACE_SYMS write_array=present/absent ..." => which vendor symbols
+ *     exist in the next scope (printed on first write8 call).
+ *   - "I2C_WR ..." lines => the vendor stack really does drive registers via
+ *     camera_reg_i2c_write8; parse with parse_i2c_trace.py.
  */
 static int32_t (*real_write)(int32_t, int32_t, int32_t, uint32_t, uint8_t);
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t log_mu = PTHREAD_MUTEX_INITIALIZER;
 static int log_fd = -1;
 
+/* constructor: fires the moment the .so is loaded, proving LD_PRELOAD worked. */
+__attribute__((constructor)) static void trace_banner(void) {
+    const char *p = getenv("I2C_TRACE_LOG");
+    fprintf(stderr, "APX_TRACE_LOADED pid=%d log=%s\n",
+            (int)getpid(), (p && p[0]) ? p : "(unset -> stderr)");
+}
+
 static void resolve(void) {
     *(void **)(&real_write) = dlsym(RTLD_NEXT, "camera_reg_i2c_write8");
-    if (!real_write) { fprintf(stderr, "APX_TRACE: camera_reg_i2c_write8 not resolvable\n"); abort(); }
-    /* Report presence of the other vendor symbols so we know whether block
-     * writes (write_array) could be hiding registers this interposer misses. */
-    fprintf(stderr, "APX_TRACE: write_array=%s read_reg16_data8=%s gpio_power_ctrl=%s\n",
+    if (!real_write) {
+        fprintf(stderr, "APX_TRACE: camera_reg_i2c_write8 NOT resolvable via RTLD_NEXT\n");
+        abort();
+    }
+    fprintf(stderr,
+            "APX_TRACE_SYMS write_array=%s read_reg16_data8=%s gpio_power_ctrl=%s\n",
             dlsym(RTLD_NEXT, "write_array") ? "present" : "absent",
             dlsym(RTLD_NEXT, "read_reg16_data8") ? "present" : "absent",
             dlsym(RTLD_NEXT, "gpio_power_ctrl") ? "present" : "absent");
@@ -54,6 +67,11 @@ static void open_log(void) {
     const char *p = getenv("I2C_TRACE_LOG");
     if (p && p[0]) {
         log_fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (log_fd >= 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            dprintf(log_fd, "# APX_TRACE pid=%d opened\n", (int)getpid());
+        }
     }
     if (log_fd < 0) log_fd = 2; /* fall back to stderr */
 }
