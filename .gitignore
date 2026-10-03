@@ -1,5 +1,9 @@
 recordings/
-tools/
+tools/*
+!tools/apx003cc_diagnostics/
+tools/apx003cc_diagnostics/*
+!tools/apx003cc_diagnostics/check_vin_recording.py
+!tools/apx003cc_diagnostics/runtime_inventory.py
 .work*
 *.log
 *.png

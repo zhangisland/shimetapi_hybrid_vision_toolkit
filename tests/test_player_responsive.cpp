@@ -7,6 +7,13 @@ namespace fake_player {extern std::atomic<int> delayMs,reads;}
 using namespace hv_player;
 using Clock=std::chrono::steady_clock;
 int main(int argc,char** argv) {
+    Shimeta::EvsTimestamp zeroTimestamp{};
+    zeroTimestamp.valid=true;
+    assert(!usableSensorTimestamp(zeroTimestamp));
+    zeroTimestamp.raw_timestamp=200;
+    assert(usableSensorTimestamp(zeroTimestamp));
+    zeroTimestamp.valid=false;
+    assert(!usableSensorTimestamp(zeroTimestamp));
     fake_player::delayMs=0;
     VideoReader sequential;assert(sequential.open("fake",30));
     cv::Mat selected;Shimeta::EvsTimestamp selectedTs{};
@@ -57,6 +64,12 @@ int main(int argc,char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         assert(prepared.preparedFrames()==24&&ts.processed_timestamp==1023);
+        for(uint64_t target=15;target<24;++target) {
+            while(!prepared.frameAt(target,f,&actual,&ts)||actual!=target) {
+                assert(Clock::now()<until);std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        assert(prepared.cachedFrameCount()==8);
         const auto reads=fake_player::reads.load();
         while(!prepared.frameAt(2,f,&actual,&ts)||actual!=2) {
             assert(Clock::now()<until);std::this_thread::sleep_for(std::chrono::milliseconds(5));

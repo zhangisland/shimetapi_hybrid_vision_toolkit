@@ -157,7 +157,12 @@ void ApsFrameCache::decodeLoop() {
             const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
             ++stats_.frames;stats_.totalMs+=ms;stats_.maxMs=std::max(stats_.maxMs,ms);
             frames_[target]={std::move(frame),timestamp};next=target+1;
-            while(frames_.size()>8) frames_.erase(frames_.begin());
+            while(frames_.size()>8) {
+                auto victim=frames_.begin();
+                // A backwards seek must not immediately evict its new frame.
+                if(victim->first==target) ++victim;
+                frames_.erase(victim);
+            }
             pending_=!frames_.count(requested_);
         }
     }
@@ -260,12 +265,8 @@ cv::Mat EvsFrameSequence::accumulatedFrameAt(size_t index, size_t count, EvsColo
     size_t end = std::min(frames_.size(), begin + std::max<size_t>(1, count));
     for (size_t i = begin; i < end; ++i) {
         const cv::Mat& src = frames_[i];
-        for (int y = 0; y < src.rows; ++y) {
-            const uint8_t* sr = src.ptr<uint8_t>(y);
-            uint8_t* dr = polarity.ptr<uint8_t>(y);
-            for (int x = 0; x < src.cols; ++x)
-                if (sr[x] != 0) dr[x] = sr[x];
-        }
+        // Masked copy preserves the most recent nonzero polarity exactly.
+        src.copyTo(polarity,src);
     }
     return renderPolarityFrame(polarity, mode);
 }
@@ -838,7 +839,7 @@ cv::Mat fitPlayerCanvas(const cv::Mat& canvas,int max_width,int max_height) {
     const double scale=std::min({1.0,double(max_width)/canvas.cols,double(max_height)/canvas.rows});
     if(scale>=1) return canvas;
     const int width=std::max(1,int(canvas.cols*scale)),height=std::max(1,int(canvas.rows*scale));
-    cv::Mat out;cv::resize(canvas,out,cv::Size(width,height),0,0,cv::INTER_AREA);
+    cv::Mat out;cv::resize(canvas,out,cv::Size(width,height),0,0,cv::INTER_LINEAR);
     const double sx=double(width)/canvas.cols,sy=double(height)/canvas.rows;
     std::lock_guard<std::mutex> lock(g_ui_mutex);
     for(auto& button:g_ui_buttons) {
