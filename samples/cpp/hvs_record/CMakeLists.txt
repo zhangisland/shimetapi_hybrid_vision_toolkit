@@ -25,6 +25,12 @@ if(HV_X5_VIN_RECORD)
     target_include_directories(hv_hvs_record_vin PRIVATE ${_vin_includes}
         "${HV_PLATFORM_SAMPLES}/vp_sensors" "${_dual}/include")
     target_link_directories(hv_hvs_record_vin PRIVATE "${HV_X5_SDK_ROOT}/lib")
+    find_package(OpenCV QUIET)
+    if(OpenCV_FOUND)
+        target_compile_definitions(hv_hvs_record_vin PRIVATE HVS_VIN_PREVIEW=1)
+        target_include_directories(hv_hvs_record_vin PRIVATE ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(hv_hvs_record_vin PRIVATE HVToolkit::shimetapi_codec ${OpenCV_LIBS})
+    endif()
     # Do not link libshimetapi_hv: its dispatcher and patched ISP branch are gone.
     target_link_libraries(hv_hvs_record_vin PRIVATE HVToolkit::shimetapi_io cam vpf hbmem Threads::Threads m)
 endif()

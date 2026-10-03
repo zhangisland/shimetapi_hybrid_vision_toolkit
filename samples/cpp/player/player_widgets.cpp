@@ -125,9 +125,12 @@ void ApsFrameCache::decodeLoop() {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock,[&]{return quitting_||pending_;});
             if(quitting_) return;
-            if(frames_.count(requested_)) {pending_=false;continue;}
-            target=requested_;rewind=!prepare_&&target<next;
-            if(rewind) {frames_.clear();exhausted_=false;next=0;}
+            if(frames_.count(requested_)) {
+                if(!prepare_ && next<total_ && next<=requested_+2) target=next;
+                else {pending_=false;continue;}
+            } else target=requested_;
+            rewind=!prepare_&&target<next;
+            if(rewind) {std::cout<<"APS cache rewind target="<<target<<" next="<<next<<std::endl;frames_.clear();exhausted_=false;next=0;}
             if(exhausted_) {pending_=false;continue;}
         }
         cv::Mat frame;Shimeta::EvsTimestamp timestamp{};bool ok=false;
@@ -155,6 +158,7 @@ void ApsFrameCache::decodeLoop() {
             std::lock_guard<std::mutex> lock(mutex_);
             if(!ok) {exhausted_=true;total_=next;pending_=false;continue;}
             const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+            if(ms>250) std::cout<<"Slow APS fetch target="<<target<<" rewind="<<rewind<<" ms="<<ms<<std::endl;
             ++stats_.frames;stats_.totalMs+=ms;stats_.maxMs=std::max(stats_.maxMs,ms);
             frames_[target]={std::move(frame),timestamp};next=target+1;
             while(frames_.size()>8) {
@@ -163,7 +167,7 @@ void ApsFrameCache::decodeLoop() {
                 if(victim->first==target) ++victim;
                 frames_.erase(victim);
             }
-            pending_=!frames_.count(requested_);
+            pending_=!frames_.count(requested_) || (!prepare_ && next<total_ && next<=requested_+2);
         }
     }
 }
@@ -686,7 +690,10 @@ cv::Mat composeSideBySide(const cv::Mat& evs_frame, const cv::Mat& video_frame,
                           EvsStepMode evs_sm, EvsColorMode evs_cm,
                           bool sync_en, double speed, bool evs_play, bool aps_play) {
     cv::Mat evs = scaleDisplayNearest(evs_frame.empty() ? makeBlank(kEventDisplayWidth, kEventDisplayHeight) : evs_frame);
-    cv::Mat aps = scaleDisplayNearest(scaleHalfNearest(video_frame));
+    cv::Mat apsHalf;
+    if(video_frame.empty()) apsHalf=makeBlank(816,612);
+    else cv::resize(video_frame,apsHalf,cv::Size(816,std::max(1,int(816.*video_frame.rows/video_frame.cols))),0,0,cv::INTER_NEAREST);
+    cv::Mat aps = scaleDisplayNearest(apsHalf);
     int cw = evs.cols + aps.cols, ih = std::max(evs.rows, aps.rows);
     int w = cw + kSidebarWidth, h = std::max(ih + kBottomBarHeight, kMinSidebarHeight);
     int cy = std::max(0, (h - (ih + kBottomBarHeight)) / 2);

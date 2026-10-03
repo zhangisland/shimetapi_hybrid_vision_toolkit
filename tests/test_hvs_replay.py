@@ -42,3 +42,11 @@ class ReplayTests(unittest.TestCase):
     def test_nv12_rejects_explicit_bayer(self):
         with self.assertRaisesRegex(RuntimeError,'preserved Gray8'):
             self.replay(0,['--aps-bayer','gbrg'])
+
+    def test_preview_defaults_and_full_resolution(self):
+        command=self.replay(4)
+        self.assertEqual(command[command.index('--aps-preview-scale')+1],'4')
+        self.assertNotIn('--precache-aps',command)
+        command=self.replay(4,['--aps-preview-scale','1','--precache-aps'])
+        self.assertEqual(command[command.index('--aps-preview-scale')+1],'1')
+        self.assertIn('--precache-aps',command)

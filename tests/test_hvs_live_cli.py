@@ -32,3 +32,12 @@ class LiveCliTests(unittest.TestCase):
             hvs.print_exposure_summary({'aps_exposure_requested_us': '50'})
         self.assertIn('aps_exposure_actual_us=unknown', output.getvalue())
         self.assertIn('aps_exposure_readback_seconds=unknown', output.getvalue())
+
+    @mock.patch.object(hvs.platform, 'system', return_value='Linux')
+    def test_raw_preview_same_controls_no_record(self, _):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=Path(tmp)/'vin';binary.write_bytes(b'fake')
+            with mock.patch.object(hvs,'executable',return_value=binary), mock.patch.object(hvs.os,'execve',side_effect=SystemExit) as execute:
+                with self.assertRaises(SystemExit):
+                    hvs.main(['live','--x5-vin-bypass','--','--aps-gain-db','0','--i2c-bus','6'])
+                self.assertEqual(execute.call_args.args[1],[str(binary),'--preview','--aps-gain-db','0','--i2c-bus','6'])

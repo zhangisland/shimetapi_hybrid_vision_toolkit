@@ -5,6 +5,25 @@
 template<class F> void rejects(F f) { bool caught=false; try{f();}catch(const std::exception&){caught=true;} CHECK(caught); }
 int main() {
  try {
+    // LUT optimization must match the prior float pipeline pixel for pixel.
+    for(const char* pattern:{"rggb","bggr","grbg","gbrg"}) for(double gamma:{1.,2.2,3.1}) {
+        std::vector<uint8_t> input(128*96);
+        for(size_t i=0;i<input.size();++i)input[i]=uint8_t((i*37+i/128)%256);
+        Shimeta::Frame f{};f.width=128;f.height=96;f.format=Shimeta::PixelFormat::Gray8;f.aps={input.data(),input.size()};
+        hv_player::ApsIsp optimized;optimized.pattern=pattern;optimized.config.gamma=gamma;
+        optimized.config.mode="manual";optimized.config.gains={1.37,1,2.13};
+        const auto output=optimized.process(f).clone();cv::Mat expected;
+        cv::max(optimized.linear,0,expected);cv::min(expected,1,expected);
+        cv::pow(expected,1/gamma,expected);expected.convertTo(expected,CV_8UC3,255);
+        CHECK(cv::norm(output,expected,cv::NORM_INF)==0);
+        for(int scale:{2,4}) {
+            hv_player::ApsIsp preview;preview.pattern=pattern;preview.previewScale=scale;preview.config.mode="off";
+            preview.process(f);
+            CHECK(preview.raw.cols==f.width/scale && preview.raw.rows==f.height/scale);
+            for(int y=0;y<preview.raw.rows;++y)for(int x=0;x<preview.raw.cols;++x)
+                CHECK(preview.raw.at<uint8_t>(y,x)==input[((y/2)*2*scale+(y&1))*f.width+(x/2)*2*scale+(x&1)]);
+        }
+    }
     hv_aps::Config c; c.validate(); c.black=255; rejects([&]{c.validate();}); c.black=0;
     c.gains[0]=NAN; rejects([&]{c.validate();}); c.gains={1,1,1};
     rejects([]{hv_aps::rejectHardwareRequest("--aps-exposure-us");});

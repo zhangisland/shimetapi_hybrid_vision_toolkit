@@ -28,6 +28,7 @@ struct ApsIsp {
     hv_aps::WhiteBalance wb;
     std::string pattern="none", geometry;
     cv::Mat raw,black,balanced,linear,display;
+    int previewScale=1; // CFA-cell subsampling for display only; files remain full resolution.
     bool ispOutputCorrection=false; // NV12 residual WB only; ISP owns CCM/gamma
     double saturated=0; uint64_t frames=0;
     ApsIsp() { wb.setMode(config.mode,config,false); }
@@ -71,6 +72,26 @@ struct ApsIsp {
         if(m=="manual") config.gains=wb.gains;
     }
     cv::Mat process(const Shimeta::Frame& f) {
+        if(previewScale==1 || pattern=="none") return processFull(f);
+        if(previewScale!=2 && previewScale!=4) throw std::invalid_argument("Preview scale must be 1, 2 or 4");
+        const size_t n=size_t(f.width)*f.height;
+        if(f.width<4*previewScale || f.height<4*previewScale || !f.aps.data ||
+           (f.format!=Shimeta::PixelFormat::Gray8 && f.format!=Shimeta::PixelFormat::NV12) ||
+           f.aps.size!=(f.format==Shimeta::PixelFormat::Gray8?n:n*3/2))
+            throw std::runtime_error("Invalid preview RAW layout");
+        if(f.format==Shimeta::PixelFormat::NV12 &&
+           !std::all_of(f.aps.data+n,f.aps.data+n*3/2,[](uint8_t v){return v==128;}))
+            throw std::runtime_error("Bayer preview requires neutral UV");
+        const int w=(f.width/previewScale)&~1,h=(f.height/previewScale)&~1;
+        cv::Mat small(h,w,CV_8UC1);
+        // Select intact 2x2 CFA cells: ordinary resize corrupts Bayer parity.
+        for(int y=0;y<h;++y) for(int x=0;x<w;++x)
+            small.ptr<uint8_t>(y)[x]=f.aps.data[((y/2)*2*previewScale+(y&1))*f.width+(x/2)*2*previewScale+(x&1)];
+        Shimeta::Frame reduced=f;reduced.width=w;reduced.height=h;
+        reduced.format=Shimeta::PixelFormat::Gray8;reduced.aps={small.data,small.total()};
+        return processFull(reduced); // Keep the cache small; only the UI scales it.
+    }
+    cv::Mat processFull(const Shimeta::Frame& f) {
         config.validate();
         if(!validApsBayerMode(pattern) || f.width<4 || f.height<4 || f.width%2 || f.height%2 || !f.aps.data)
             throw std::runtime_error("Invalid APS geometry/Bayer mode");
@@ -125,11 +146,12 @@ struct ApsIsp {
         raw.convertTo(black,CV_32F,1/(255-config.black),-config.black/(255-config.black));
         cv::max(black,0,black);
         std::vector<hv_aps::Gains> cells;
+        const int parityChannels[2][2]={{channel(pattern,0,0),channel(pattern,0,1)},{channel(pattern,1,0),channel(pattern,1,1)}};
         int step=std::max(2,(f.width/128/2)*2);
         for(int r=0;r<f.height-1;r+=step) for(int c=0;c<f.width-1;c+=step) {
             hv_aps::Gains v{0,0,0}; bool clipped=false;
             for(int dy=0;dy<2;++dy) for(int dx=0;dx<2;++dx) {
-                int ch=channel(pattern,r+dy,c+dx);
+                int ch=parityChannels[dy][dx];
                 float sample=black.at<float>(r+dy,c+dx);
                 clipped=clipped || sample>.96 || sample<.03;
                 v[ch]+=sample*(ch==1?.5:1);
@@ -139,16 +161,34 @@ struct ApsIsp {
         }
         wb.update(hv_aps::estimate(cells,config));
         auto gains=wb.applied(); balanced=black.clone();
-        for(int r=0;r<f.height;++r) for(int c=0;c<f.width;++c)
-            balanced.at<float>(r,c)*=float(gains[channel(pattern,r,c)]);
+        // Same per-pixel multiplication, but resolve CFA strings only four
+        // times per frame instead of for every pixel. No ISP tuning changes.
+        const float parityGains[2][2]={{float(gains[channel(pattern,0,0)]),float(gains[channel(pattern,0,1)])},
+                                      {float(gains[channel(pattern,1,0)]),float(gains[channel(pattern,1,1)])}};
+        for(int r=0;r<f.height;++r) {
+            float* row=balanced.ptr<float>(r);
+            const float even=parityGains[r&1][0],odd=parityGains[r&1][1];
+            for(int c=0;c<f.width;c+=2) {row[c]*=even;row[c+1]*=odd;}
+        }
         // Headroom scaling preserves highlights through the uint16 demosaicer.
         double headroom=std::max(1.,*std::max_element(gains.begin(),gains.end()));
         cv::Mat b16,bgr16; balanced.convertTo(b16,CV_16U,65535/headroom);
         cv::demosaicing(b16,bgr16,apsBayerCode(pattern));
         bgr16.convertTo(linear,CV_32F,headroom/65535); // BGR, identity CCM (uncalibrated)
         saturated=double(cv::countNonZero(raw>=250))/n;
-        cv::Mat encoded; cv::max(linear,0,encoded); cv::min(encoded,1,encoded);
-        cv::pow(encoded,1/config.gamma,encoded); encoded.convertTo(display,CV_8UC3,255);
+        // bgr16 has only 65536 possible values. Evaluate exactly the same
+        // OpenCV float/clamp/pow/round sequence once per value, not per pixel.
+        cv::Mat domain(1,65536,CV_16UC1),encoded,lut;
+        for(int i=0;i<65536;++i) domain.ptr<uint16_t>()[i]=uint16_t(i);
+        domain.convertTo(encoded,CV_32F,headroom/65535);
+        cv::max(encoded,0,encoded);cv::min(encoded,1,encoded);
+        cv::pow(encoded,1/config.gamma,encoded);encoded.convertTo(lut,CV_8U,255);
+        display.create(f.height,f.width,CV_8UC3);
+        const auto* table=lut.ptr<uint8_t>();
+        for(int r=0;r<f.height;++r) {
+            const auto* src=bgr16.ptr<uint16_t>(r);auto* dst=display.ptr<uint8_t>(r);
+            for(int c=0;c<f.width*3;++c) dst[c]=table[src[c]];
+        }
         ++frames; return display;
     }
     std::string status() const {
@@ -180,6 +220,11 @@ struct ApsIsp {
 };
 // Options shared by live preview and playback. Unsupported hardware requests fail before Init.
 inline bool apsOption(const std::string& key,int& i,int argc,char** argv,ApsIsp& isp) {
+    if(key=="--aps-preview-scale") {
+        if(++i>=argc) throw std::invalid_argument("Missing preview scale");
+        const std::string v=argv[i];if(v!="1"&&v!="2"&&v!="4") throw std::invalid_argument("Preview scale: 1, 2 or 4");
+        isp.previewScale=std::stoi(v);return true;
+    }
     if(key=="--aps-capabilities") { std::cout<<hv_aps::capabilities()<<std::endl; return true; }
     for(const char* k:{"--aps-exposure-us","--aps-fps","--aps-format","--aps-gain","--aps-ae","--aps-hardware-wb"})
         if(key==k) hv_aps::rejectHardwareRequest(key);

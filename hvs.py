@@ -120,6 +120,7 @@ def main(argv=None):
     b.add_argument('--sdk-include-dir', type=Path, action='append', default=[],
                    help='Additional matching SDK header directory; repeat for split layouts')
     live = sub.add_parser('live', help='Native dual VC + APS ISP approximate synchronized display')
+    live.add_argument('--x5-vin-bypass', action='store_true', help='Preview the same raw VIN mode as recording, without saving')
     live.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     live.add_argument('live_args', nargs=argparse.REMAINDER, help='Use -- then native options; --help for executable help')
     r = sub.add_parser('record', help='Start foreground recording; Ctrl+C gracefully stops')
@@ -159,6 +160,8 @@ def main(argv=None):
     p.add_argument('--speed', type=number, default=1)
     p.add_argument('--window-width', type=int, default=1280, help='Maximum initial player canvas width')
     p.add_argument('--window-height', type=int, default=720, help='Maximum initial player canvas height')
+    p.add_argument('--aps-preview-scale', type=int, choices=[1,2,4], default=4, help='Display-only CFA subsampling; 1 preserves full-resolution processing')
+    p.add_argument('--precache-aps', action='store_true', help='Optional full-sequence ISP preparation before playback')
     p.add_argument('--dump-timestamps', action='store_true', help='Inspect without a GUI')
     for kind in ('csv', 'npz'):
         c = sub.add_parser('export-' + kind, help='Decode hvs_record RAW8 to ' + kind.upper())
@@ -257,10 +260,12 @@ def main(argv=None):
         return 0
     if args.command == 'live':
         cache = build / 'CMakeCache.txt'
-        if not cache.is_file() or 'HV_X5_NATIVE:BOOL=ON' not in cache.read_text():
+        if not args.x5_vin_bypass and (not cache.is_file() or 'HV_X5_NATIVE:BOOL=ON' not in cache.read_text()):
             raise RuntimeError('Build first with --with-native-live; native live never uses VIN bypass.')
-        binary = executable(build, 'hv_sample_live_record_display', 'live_record_display')
+        binary = executable(build, 'hv_hvs_record_vin', 'hvs_record') if args.x5_vin_bypass else executable(build, 'hv_sample_live_record_display', 'live_record_display')
         options = args.live_args[1:] if args.live_args[:1] == ['--'] else args.live_args
+        if args.x5_vin_bypass:
+            options = ['--preview', *options]
         with binary.open('rb') as stream:
             digest = hashlib.sha256()
             for block in iter(lambda: stream.read(1024 * 1024), b''):
@@ -353,6 +358,9 @@ def main(argv=None):
         print_exposure_summary(summary)
         player = executable(build, 'hv_sample_player', 'player')
         command = [player, folder / 'events.raw', folder / 'aps.avi', '30', str(args.speed)]
+        command.extend(['--aps-preview-scale', str(args.aps_preview_scale)])
+        if args.precache_aps:
+            command.append('--precache-aps')
         command.extend(['--window-width', str(args.window_width), '--window-height', str(args.window_height)])
         if args.aps_bayer != 'none':
             command.extend(['--aps-bayer', args.aps_bayer])

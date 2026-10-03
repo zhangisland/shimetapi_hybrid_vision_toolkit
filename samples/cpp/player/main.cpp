@@ -66,6 +66,7 @@ static void installSignalHandlers() {
 }
 
 int main(int argc, char** argv) {
+    const auto launched=std::chrono::steady_clock::now();
     installSignalHandlers();
     cv::setNumThreads(2);
     if (argc < 3) { printUsage(argv[0]); return 1; }
@@ -75,11 +76,12 @@ int main(int argc, char** argv) {
     bool dump_timestamps = false;
     double fallback_fps = 30.0, speed = 1.0;
     int window_width=1280,window_height=720;
-    ApsIsp isp;
+    ApsIsp isp;isp.previewScale=4;bool precache=false;
     int numeric_arg = 0;
     try {
     for (int i = 3; i < argc; ++i) {
         const std::string option=argv[i];
+        if(option=="--precache-aps") {precache=true;continue;}
         if(option=="--window-width"||option=="--window-height") {
             if(++i>=argc) throw std::invalid_argument("Missing viewport size");
             size_t consumed=0;const int value=std::stoi(argv[i],&consumed);
@@ -102,14 +104,16 @@ int main(int argc, char** argv) {
     if (fallback_fps <= 0.0 || speed <= 0.0) { printUsage(argv[0]); return 1; }
     if (dump_timestamps) return dumpTimestamps(raw_path, avi_path, std::cout) ? 0 : 1;
 
+    std::cout<<"APS display preview scale="<<isp.previewScale<<"; full-resolution input unchanged; precache="<<precache<<std::endl;
     // ---- 加载 EVS ----
     EvsFrameSequence evs_seq;
     if (!evs_seq.open(raw_path)) return 1;
+    std::cout<<"EVS startup seconds="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-launched).count()<<std::endl;
 
     // ---- 加载 APS ----
     ApsFrameCache video_cache;
     video_cache.setIsp(isp);
-    if (!video_cache.open(avi_path, fallback_fps,isp.pattern!="none")) {
+    if (!video_cache.open(avi_path, fallback_fps,precache && isp.pattern!="none")) {
         std::cerr << "Failed to open AVI: " << avi_path << std::endl;
         return 1;
     }
@@ -238,6 +242,7 @@ int main(int argc, char** argv) {
                 }
                 if(!ready) {
                     ready=true;aps_frame_index=actual;resetClocks();reportStart=Clock::now();
+                    std::cout<<"First APS ready seconds="<<std::chrono::duration<double>(Clock::now()-launched).count()<<std::endl;
                     if(!timeline.host&&!has_ts_sync&&!usableSensorTimestamp(displayedTimestamp))
                         std::cerr<<"SYNC fallback: recording starts aligned; original clock offset UNKNOWN. Keep native vin.frames.jsonl for host alignment.\n";
                 }

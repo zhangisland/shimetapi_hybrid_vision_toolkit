@@ -35,15 +35,18 @@ struct Options {
  double seconds=0,warmup=1,timeout=10,stall=2,us=0,lineUs=0,gain=-1;
  size_t maxBytes=1024ULL<<20;
  int lines=0,bus=-1,address=0x3c,profile=1;
- std::string diagnostic="record";
+ std::string diagnostic="record",previewBayer="gbrg";
+ bool preview=false;int previewWidth=960,previewScale=4;
 };
 static Options parse(int argc,char** argv) {
  Options o;
  for(int i=1;i<argc;++i) {
    std::string k=argv[i];
+   if(k=="--preview") {o.preview=true;continue;}
    if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--aps-exposure-lines 100 | --aps-exposure-us 1000 --aps-line-time-us VERIFIED] [--aps-gain-db 0] --i2c-bus VERIFIED\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
    std::string v=argv[++i];
+   if(k=="--aps-bayer") {if(v!="none"&&v!="gbrg"&&v!="rggb"&&v!="bggr"&&v!="grbg")throw std::runtime_error("Invalid preview Bayer pattern");o.previewBayer=v;continue;}
    if(k=="--output") {o.output=v;continue;}
    if(k=="--storage") {if(v!="memory") throw std::runtime_error("native VIN requires --storage memory; legacy SDK provides disk baseline");continue;}
    if(k=="--ram-dir") continue; // deprecated compatibility; no tmpfs is used
@@ -51,7 +54,9 @@ static Options parse(int argc,char** argv) {
    size_t used=0; double n=std::stod(v,&used);
    if(used!=v.size()||!std::isfinite(n)||n<0) throw std::runtime_error("Invalid number: "+v);
    auto integer=[&](int lo,int hi) {if(n<lo||n>hi||n!=std::floor(n)) throw std::runtime_error("Invalid integer: "+k); return int(n);};
-   if(k=="--seconds") {if(n>86400) throw std::runtime_error("seconds must be <=86400");o.seconds=n;}
+   if(k=="--preview-width") o.previewWidth=integer(640,1920);
+   else if(k=="--aps-preview-scale") {o.previewScale=integer(1,4);if(o.previewScale==3)throw std::runtime_error("Preview scale 1, 2 or 4");}
+   else if(k=="--seconds") {if(n>86400) throw std::runtime_error("seconds must be <=86400");o.seconds=n;}
    else if(k=="--warmup") {if(n>300) throw std::runtime_error("warmup must be <=300");o.warmup=n;}
    else if(k=="--timeout") o.timeout=n;
    else if(k=="--aps-stall-timeout") o.stall=n;
@@ -69,7 +74,7 @@ static Options parse(int argc,char** argv) {
    else if(k=="--evs-height") {if(n!=608) throw std::runtime_error("event geometry is 768x608");}
    else throw std::runtime_error("Unknown option: "+k);
  }
- if(o.output.empty()||o.timeout<=0||o.stall<=0) throw std::runtime_error("output and positive timeouts required");
+ if((o.output.empty()&&!o.preview)||o.timeout<=0||o.stall<=0) throw std::runtime_error("output and positive timeouts required");
  if(o.lines&&o.us) throw std::runtime_error("exposure lines and microseconds are mutually exclusive");
  if(o.us) o.lines=apx::exposureLines(o.us,o.lineUs);
  if((o.lines||o.gain>=0)&&o.bus<0) throw std::runtime_error("Manual control requires explicit --i2c-bus from board configuration (no scanning)");
@@ -119,6 +124,9 @@ public:
 #endif
  }
 };
+#ifdef HVS_VIN_PREVIEW
+#include "vin_preview.h"
+#endif
 struct Stats {
  std::atomic<uint64_t> frames{0},last{0};
  uint64_t first=0,bytes=0,warmup=0,errors=0,gaps=0,duplicates=0,resets=0,overflow=0;
@@ -186,12 +194,26 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
  std::vector<uint8_t> packedEvents(size_t(4096)*256);
  uint64_t aps=0,evs=0,offset=0,evsOffset=0,evsPackedBytes=0,done=0,invalid=0,convertNs=0,writeNs=0,verifyNs=0;
  int progress=-1;
+ uint64_t syncNs=0;
  try {
+ // Flush each large stream contiguously. Interleaving four large dirty files
+ // makes the SD controller repeatedly switch extents during writeback.
+ for(int stream=0;stream<2;++stream) {
+   auto& out=stream?raw:evsRaw;const char* name=stream?"aps.vin.bin":"evs.vin.bin";
+   const auto writeStart=ns();
+   arena.each([&](const MemoryArena::Header& h,const uint8_t* bytes) {
+     if(int(h.stream)==stream)out.write(reinterpret_cast<const char*>(bytes),h.bytes);
+   });
+   checkedClose(out);writeNs+=ns()-writeStart;
+   std::cout<<"Saving original "<<name<<": waiting for storage sync"<<std::endl;
+   const auto flush=ns();RecordingStorage::syncFile(stage/name);syncNs+=ns()-flush;
+ }
+ for(int stream=0;stream<2;++stream) {
  arena.each([&](const MemoryArena::Header& h,const uint8_t* bytes) {
+   if(int(h.stream)!=stream)return;
    const auto start=ns();
    Shimeta::Frame f{};f.width=h.width;f.height=h.height;f.frame_id=int(h.frameId);
    if(h.stream) {
-     raw.write(reinterpret_cast<const char*>(bytes),h.bytes);
      writeNs+=ns()-start;
      const auto convert=ns();
      if(h.width!=1632||h.height!=1224||h.stride<h.width*2||h.bytes<uint64_t(h.stride)*h.height) throw std::runtime_error("Unexpected APS RAW layout");
@@ -204,7 +226,6 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
      convertNs+=ns()-convert;
      f.aps={preview.data(),preview.size()};f.format=Shimeta::PixelFormat::NV12;++aps;
    } else {
-     evsRaw.write(reinterpret_cast<const char*>(bytes),h.bytes);
      if(h.width!=4096||h.height!=256||h.stride<h.width||h.bytes<uint64_t(h.stride)*h.height) throw std::runtime_error("Unexpected EVS RAW layout");
      for(size_t y=0;y<h.height;++y) std::memcpy(packedEvents.data()+y*h.width,bytes+y*h.stride,h.width);
      f.evs={packedEvents.data(),packedEvents.size()};evsPackedBytes+=packedEvents.size();++evs;
@@ -224,8 +245,9 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
    int percent=int(done*100/std::max<size_t>(arena.used(),1));
    if(percent/10!=progress) {progress=percent/10;std::cout<<"Saving "<<percent<<"% APS="<<aps<<" EVS packets="<<evs<<std::endl;}
  });
+ }
  if(writer.apsFrameCount()!=aps) throw std::runtime_error("AVI writer frame count mismatch");
- writer.close();checkedClose(raw);checkedClose(evsRaw);checkedClose(meta);
+ writer.close();checkedClose(meta);
  } catch(...) {writer.close();throw;}
  if(aps&&fps>0) setAviFrameRate(stage/"aps.avi",fps);
  if(fs::file_size(stage/"aps.vin.bin")!=offset || fs::file_size(stage/"evs.vin.bin")!=evsOffset || fs::file_size(stage/"events.raw")<evsPackedBytes ||
@@ -255,12 +277,15 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
    }
  });
  eventCheck.close();verifyNs+=ns()-packedVerify;
- for(auto name:{"aps.vin.bin","evs.vin.bin","vin.frames.jsonl","events.raw","aps.avi"}) RecordingStorage::syncFile(stage/name);
+ const auto finalSync=ns();
+ for(auto name:{"vin.frames.jsonl","events.raw","aps.avi"}) RecordingStorage::syncFile(stage/name);
+ syncNs+=ns()-finalSync;
  std::ofstream summary(stage/"summary.txt",std::ios::trunc);
  summary<<report<<"aps_frames="<<aps<<"\nevs_packets="<<evs<<"\naps_observed_fps="<<fps
    <<"\naps_width=1632\naps_height=1224\nevs_width=768\nevs_height=608\ngray8_frames="<<aps
    <<"\naps_paired_timestamps=0\naps_storage_format=RAW10_16LE_with_stride_and_NV12_preview"
    <<"\nraw10_words_outside_10bits="<<invalid<<"\npreview_layout_status="<<(invalid?"UNVERIFIED_do_not_use_preview_for_photometry":"matches_bundled_SDK_word_shift_2")
+   <<"\nsync_ns="<<syncNs<<"\nsave_file_bytes="<<(fs::file_size(stage/"aps.vin.bin")+fs::file_size(stage/"evs.vin.bin")+fs::file_size(stage/"events.raw")+fs::file_size(stage/"aps.avi"))
    <<"\nconvert_ns="<<convertNs<<"\nwrite_ns="<<writeNs<<"\nverify_ns="<<verifyNs
    <<"\nsave_seconds="<<(ns()-begin)/1e9<<"\nsave_payload_MiB_per_second="<<(arena.used()/1048576.0)/((ns()-begin)/1e9)<<'\n';
  checkedClose(summary);RecordingStorage::syncFile(stage/"summary.txt");
@@ -422,5 +447,11 @@ static int run(const Options& o) {
  return error.empty()?0:2;
 }
 int main(int argc,char** argv) {
- try {return run(parse(argc,argv));}catch(const std::exception& e) {std::cerr<<"ERROR: "<<e.what()<<'\n';return 1;}
+ try {const auto options=parse(argc,argv);if(options.preview) {
+#ifdef HVS_VIN_PREVIEW
+   return previewVin(options);
+#else
+   throw std::runtime_error("Preview requires an OpenCV-enabled VIN build");
+#endif
+ }return run(options);}catch(const std::exception& e) {std::cerr<<"ERROR: "<<e.what()<<'\n';return 1;}
 }
