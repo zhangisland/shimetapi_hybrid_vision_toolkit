@@ -51,7 +51,7 @@ static int previewVin(const Options& o) {
  struct Join {std::atomic<bool>& stop;std::thread& a;std::thread& b;~Join(){stop=true;if(a.joinable())a.join();if(b.joinable())b.join();}} join{stop,evs,aps};
  hv_player::ApsIsp isp;isp.pattern=o.previewBayer;isp.previewScale=o.previewScale;
  Shimeta::codec::MipiRaw8Decoder decoder;
- const auto begin=ns();auto report=begin,verify=begin;uint64_t shown=0,last=0,lastEvs=0,dropped=0;
+ const auto begin=ns();auto report=begin,verify=begin;uint64_t shown=0,last=0,lastEvs=0,dropped=0,lastSampleHost=begin;
  std::vector<uint8_t> raw(3995136),eventBytes(1048576),gray(1632*1224);
  double rawMean=0,rawSaturation=0,evsRate=0;uint64_t evsTotal=0,evsRateMark=0,evsRateTime=begin;
  cv::Mat eventView(608,768,CV_8UC3,cv::Scalar(0)),apsView;
@@ -63,7 +63,7 @@ static int previewVin(const Options& o) {
   uint64_t sequence=0,apsHost=0,evsHost=0;bool fresh=false;
   {std::lock_guard<std::mutex> hold(slots[1].mutex);sequence=slots[1].sequence;if(sequence&&sequence!=last){raw=slots[1].bytes;apsHost=slots[1].host;fresh=true;}}
   if(fresh) {
-   if(last&&sequence>last+1)dropped+=sequence-last-1;last=sequence;
+   if(last&&sequence>last+1)dropped+=sequence-last-1;last=sequence;lastSampleHost=apsHost;
    uint64_t saturated=0,sum=0;
    for(size_t i=0;i<gray.size();++i){const unsigned v=raw[2*i]|(unsigned(raw[2*i+1])<<8);gray[i]=uint8_t(std::min(v>>2,255u));if(i){sum+=v;saturated+=v>=1020&&v<=1023;}}
    rawMean=double(sum)/(gray.size()-1);rawSaturation=100.*saturated/(gray.size()-1);
@@ -80,7 +80,7 @@ static int previewVin(const Options& o) {
    cv::imshow("HVS VIN preview - NO RECORDING",canvas);++shown;
   }
   if(o.verifyRegs&&ns()-verify>=1000000000ULL){if(sensor)apx::verify(*sensor,regs);verify=ns();}
-  if(ns()-report>=1000000000ULL){const auto tick=ns();evsRate=double(evsTotal-evsRateMark)*1e9/double(tick-evsRateTime);evsRateMark=evsTotal;evsRateTime=tick;std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<" evs_events_per_s="<<uint64_t(evsRate)<<" evs_event_scope=displayed_packets_only"<<std::endl;report=ns();}
+  if(ns()-report>=1000000000ULL){const auto tick=ns();evsRate=double(evsTotal-evsRateMark)*1e9/double(tick-evsRateTime);evsRateMark=evsTotal;evsRateTime=tick;std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<" evs_events_per_s="<<uint64_t(evsRate)<<" telemetry_ns="<<tick<<" raw_sample_sequence="<<last<<" raw_sample_age_ms="<<double(tick-lastSampleHost)/1e6<<" evs_event_scope=displayed_packets_only"<<std::endl;report=ns();}
   if(ns()-begin>uint64_t(o.timeout*1e9)&&(!counts[0]||!counts[1]))throw std::runtime_error("Preview stream absent");
   const int key=cv::waitKey(1)&255;if(key==27||key=='q')break;
  }

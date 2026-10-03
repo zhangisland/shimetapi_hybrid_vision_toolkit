@@ -51,8 +51,8 @@ class Preview:
         for line in self.proc.stdout:
             self.log.write(line)
             if not line.startswith('Preview APS received='): continue
-            values={k:float(v) for k,v in re.findall(r'(received|packets|displayed|raw_mean|raw_sat_percent)=([0-9.]+)',line)}
-            if len(values)==5:
+            values={k:float(v) for k,v in re.findall(r'(received|packets|displayed|raw_mean|raw_sat_percent|telemetry_ns|raw_sample_sequence|raw_sample_age_ms)=([0-9.]+)',line)}
+            if len(values)==8:
                 values['time']=time.monotonic()
                 with self.lock:self.rows.append(values)
     def measure(self, settle=1.5, window=3):
@@ -73,8 +73,8 @@ class Preview:
 def evaluate(rows):
     if len(rows)<2: raise RuntimeError('Insufficient fresh telemetry samples')
     for a,b in zip(rows,rows[1:]):
-        dt=b['time']-a['time']
-        if not 0<dt<2.5 or any(b[k]<=a[k] for k in ('received','packets','displayed')):
+        dt=(b['telemetry_ns']-a['telemetry_ns'])/1e9
+        if not 0<dt<2.5 or any(b[k]<=a[k] for k in ('received','packets','displayed','raw_sample_sequence')) or b['raw_sample_age_ms']>500:
             raise RuntimeError('STALE / stopped APS, EVS or displayed RAW sample; window INVALID')
         if min(b['received']-a['received'],b['packets']-a['packets'])/dt<20:
             raise RuntimeError('Stream rate below 20/s; candidate changes/stalls timing, window INVALID')
@@ -84,9 +84,9 @@ def evaluate(rows):
             'aps_first':rows[0]['received'],'aps_last':rows[-1]['received'],
             'evs_first':rows[0]['packets'],'evs_last':rows[-1]['packets'],
             'displayed_first':rows[0]['displayed'],'displayed_last':rows[-1]['displayed'],
-            'aps_rate':(rows[-1]['received']-rows[0]['received'])/(rows[-1]['time']-rows[0]['time']),
-            'evs_packet_rate':(rows[-1]['packets']-rows[0]['packets'])/(rows[-1]['time']-rows[0]['time']),
-            'samples':len(rows),'window_s':rows[-1]['time']-rows[0]['time']}
+            'aps_rate':(rows[-1]['received']-rows[0]['received'])/((rows[-1]['telemetry_ns']-rows[0]['telemetry_ns'])/1e9),
+            'evs_packet_rate':(rows[-1]['packets']-rows[0]['packets'])/((rows[-1]['telemetry_ns']-rows[0]['telemetry_ns'])/1e9),
+            'samples':len(rows),'window_s':(rows[-1]['telemetry_ns']-rows[0]['telemetry_ns'])/1e9}
 
 def stable(reference, current):
     # Black-corrected signal drift; black=64 is a diagnostic estimate, not calibration.
@@ -135,7 +135,7 @@ def main():
             finally:
                 if args.standby:bus.write(0x340c,1)
             emit('write_audit',{'requested':value,'readback':immediate,'register':hex(args.register),'standby':args.standby})
-            measured=preview.measure();after=bus.snapshot()
+            measured=preview.measure(settle=3 if args.standby else 1.5);after=bus.snapshot()
             trial={'requested':value,'readback':immediate,'after':after,'measurement':measured}
             result['trials'].append(trial);emit('candidate',trial)
             if any(abs(measured[k]/baseline[k]-1)>.10 for k in ('aps_rate','evs_packet_rate')):
