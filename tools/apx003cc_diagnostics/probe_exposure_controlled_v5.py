@@ -84,6 +84,8 @@ def evaluate(rows):
             'aps_first':rows[0]['received'],'aps_last':rows[-1]['received'],
             'evs_first':rows[0]['packets'],'evs_last':rows[-1]['packets'],
             'displayed_first':rows[0]['displayed'],'displayed_last':rows[-1]['displayed'],
+            'aps_rate':(rows[-1]['received']-rows[0]['received'])/(rows[-1]['time']-rows[0]['time']),
+            'evs_packet_rate':(rows[-1]['packets']-rows[0]['packets'])/(rows[-1]['time']-rows[0]['time']),
             'samples':len(rows),'window_s':rows[-1]['time']-rows[0]['time']}
 
 def stable(reference, current):
@@ -95,7 +97,7 @@ def stable(reference, current):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--register',type=lambda x:int(x,0),choices=[0x3253,0x3252,0x3125],required=True)
-    p.add_argument('--values',nargs='+',type=lambda x:int(x,0),default=[0,16,64,128,255])
+    p.add_argument('--values',nargs='+',type=lambda x:int(x,0),required=True)
     p.add_argument('--i2c-bus',type=int,default=6)
     p.add_argument('--i2c-address',type=lambda x:int(x,0),default=0x3c)
     p.add_argument('--gain-db',choices=['auto','0','24'],default='auto')
@@ -127,6 +129,7 @@ def main():
             guard=bus.snapshot()
             if guard['0x3502']!=factory['0x3502'] or guard['0x3602']!=(255 if gain==0 else 16):raise RuntimeError('Mode/gain guard changed')
             bus.write(args.register,value);bus.latch();immediate=bus.read(args.register)
+            emit('write_audit',{'requested':value,'readback':immediate,'register':hex(args.register)})
             measured=preview.measure();after=bus.snapshot()
             trial={'requested':value,'readback':immediate,'after':after,'measurement':measured}
             result['trials'].append(trial);emit('candidate',trial)
