@@ -133,6 +133,8 @@ def main():
             measured=preview.measure();after=bus.snapshot()
             trial={'requested':value,'readback':immediate,'after':after,'measurement':measured}
             result['trials'].append(trial);emit('candidate',trial)
+            if any(abs(measured[k]/baseline[k]-1)>.10 for k in ('aps_rate','evs_packet_rate')):
+                raise RuntimeError('Candidate changes dual-stream rate >10%; not an isolated exposure control; restoring and STOP')
             if after[f'{args.register:#06x}']!=immediate:raise RuntimeError('Candidate readback not held')
             if after['0x3502']!=factory['0x3502'] or after['0x3602']!=guard['0x3602']:raise RuntimeError('Mode/gain changed; cannot isolate candidate')
             bus.write(args.register,original);bus.latch()
