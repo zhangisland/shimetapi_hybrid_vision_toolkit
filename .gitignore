@@ -5,6 +5,7 @@ tools/apx003cc_diagnostics/*
 !tools/apx003cc_diagnostics/check_vin_recording.py
 !tools/apx003cc_diagnostics/runtime_inventory.py
 !tools/apx003cc_diagnostics/probe_aps_exposure_v2.py
+!tools/apx003cc_diagnostics/probe_exposure_confirm_v3.py
 .work*
 *.log
 *.png
