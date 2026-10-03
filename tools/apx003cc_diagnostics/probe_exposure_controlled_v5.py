@@ -154,6 +154,8 @@ def main():
                 try:
                     if args.standby:bus.write(0x340c,1)
                     bus.write(args.register,original);bus.latch();bus.gain(0)
+                    result['cleanup_readback']={'candidate':bus.read(args.register),'gain_code':bus.read(0x3602),'stream':bus.read(0x340c)}
+                    if result['cleanup_readback']!={'candidate':original,'gain_code':255,'stream':1}:raise RuntimeError('Cleanup readback mismatch; restart camera before use')
                 except Exception as e:result['cleanup_error']=str(e)
             preview.stop()
         (args.output/'result.json').write_text(json.dumps(result,indent=2)+'\n')
