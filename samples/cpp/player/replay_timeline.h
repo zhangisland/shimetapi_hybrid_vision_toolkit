@@ -10,6 +10,10 @@
 #include <vector>
 
 namespace hv_player {
+template<class Timestamp> bool usableSensorTimestamp(const Timestamp& ts) {
+    return ts.valid && (ts.processed_timestamp != 0 || ts.raw_timestamp != 0);
+}
+
 // The native recorder has no paired sensor timestamps. Host receive times are
 // an approximate bridge, NOT exposure timestamps. Use one robust offset rather
 // than bending the sensor timeline independently for every arriving packet.

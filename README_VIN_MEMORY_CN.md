@@ -1,73 +1,29 @@
 # X5 APX003CC：双 VIN 内存录制与手动曝光
 
-## 回放不同步、慢播放和曝光报错修复（2026-10-02）
+## 2026-10-02 X5 实测更正（优先于下方历史调查）
 
-此前回放代码存在三个可复现的逻辑问题：
+已通过 SSH 在 10.129.113.92 编译和测试。详细证据见 [板端实测记录](BOARD_X5_VALIDATION_20261002.md)。
 
-1. 未带 `tsmp` 的原生 VIN AVI 用 `frame/fps` 相对时间，与 EVS 的绝对传感器时间直接匹配。
-   两个显示数字接近不能证明两幅图像来自同一时刻。
-2. EVS 按“四个有事件的唯一时间戳”拼图，忽略无事件子帧。现在按传输格式每四个空间
-   子帧拼一幅图，保留全空图；播放按 RAW8 头的时间推进，不再假设缓存索引就是 240 FPS。
-3. APS 后台仍对所有追赶帧做 ISP，形成积压；构建入口也未指定优化级别。现在明确用
-   Release，追赶时顺序读取原始 AVI，但仅对本次目标帧执行现有 ISP。颜色算法未修改。
+- 旧录像 EVS 包首两字节被 VIN 的 frame-id 注入覆盖。播放器仅在同会话元数据证明该值等于 frame_id 时，在临时副本恢复头；新录制关闭该注入，原始文件不改写。
+- 这批 AVI 的 SDK 时间戳 `valid=true` 但数值全零。零值不能作为同步依据，改用同会话 `vin.frames.jsonl`。
+- 板上 EVS 解码时间单位与主机微秒之比约 0.800004；桥接同时拟合速率和偏移，不能仅对齐起点。此方式仍是接收时间近似同步，不是曝光时刻的硬件同步。
+- 现有 ISP 每帧约 0.6 秒。颜色算法保持原样，Bayer 回放先按顺序准备全部帧，再启动播放时钟；148 帧实测 RAM 准备约 88 秒。缓存优先使用受限 RAM，不足时用自动删除的临时文件，界面显示准备进度。
+- 显示画布缩放改为线性插值，EVS 使用掩码复制累积；最终板端回放展示全部 148 个 APS 帧，约 29.57 帧/秒，跳过预览 0。准备耗时 85.88 秒，最大合成显示耗时 29.16 ms。保存数据和 ISP 算法未改。
+- 手动 **0、6、12 dB 增益**录制已成功；**曝光行数仍未通过硬件验收**：015B 写 100 后读回 0。不得把下面接口说明理解成曝光已经生效。
+- 官方芯片探测发生在初始化前（0808）；开流后 3428 读到 0202，不可继续用开流后的值判定芯片不匹配。
 
-SYNC 默认开启，EVS 根据**实际展示的 APS 帧**选择相同时段；慢解码时保留上一对图像，
-下一次追赶墙钟时间。暂停、逐帧和倍速共同控制两路；SYNC 下任一路前后按钮及 a/d 均按
-APS 帧步进，EVS 的 1/8 / 1X 按钮控制单图 / 一个 APS 周期的时间累积。
-FREE 下两路独立播放，EVS 按自身时间戳推进。初始化首帧不计入播放时钟。
-跳过的是回放预览，不删除、复制或插值录制帧；可暂停逐帧检查全部 APS 帧。
-
-时间来源按以下顺序使用：
-
-- AVI 内有效 `tsmp`：已有录制链路记录的配对传感器时间。
-- 原生 VIN 的 `vin.frames.jsonl`：用 EVS 包末子帧时间与该包 `host_ns` 建立中位数时钟偏移，
-  APS 使用同一主机的 `host_ns` 映射，界面标注 `host bridge / approx`。这只是接收时间
-  近似同步，有缓冲、传输、曝光读出及调度延迟；不能声称逐帧硬件同步。日志打印偏移跨度。
-- 旧 `timestamps.csv`：桥接到 EVS 时钟后再匹配，不直接混用 VPF 和传感器时间。
-- 没有上述信息：明确警告 `recording starts aligned; original clock offset UNKNOWN`，
-  仅将两路文件起点对齐，界面标注 `start aligned / approx`，无法恢复丢失的真实时间偏移。
-
-请保持同一会话的 `events.raw`、`aps.avi`、`vin.frames.jsonl` 在同一目录，勿混用文件。
-原生元数据数量不匹配或时间倒退会报错，不静默退回名义帧率。已有完整 VIN 录像不用重录。
-
-**重新配置并编译两个目标，只替换 Python 或运行旧的 build 命令不够：**
+板端已存在配置可使用：
 
 ```bash
 cd /app/shimetapi_hybrid_vision_toolkit
-# 平台样例目录须指向这块板实际使用的 3.4.1 样例，按部署位置调整
-python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
-grep '^CMAKE_BUILD_TYPE:' out/x5/hvs-build/CMakeCache.txt
-sha256sum out/x5/hvs-build/samples/cpp/player/hv_sample_player out/x5/hvs-build/samples/cpp/hvs_record/hv_hvs_record_vin
-python3 hvs.py play --output /app/recordings/vin_01 --window-width 1280 --window-height 720
+cmake --build out/x5/hvs-build --parallel 2 --target hv_sample_player hv_hvs_record_vin
+python3 hvs.py play --output /app/recordings/vin_01 --window-width 960 --window-height 600
 ```
 
-预期构建类型为 Release。每 5 秒回放日志报告实际展示 APS 数、跳过预览数、
-`raw-read+ISP` 耗时及 `compose+imshow` 耗时。若仍慢，用这些耗时区分解码/处理和 X11
-传输；不要用 AVI 头的 29.79 FPS 证明显示已达到该速度。没有板端/X11 实测结果。
-窗口仍先绘制完整界面，默认适配 1280×720，底部按钮和侧栏随画布同比缩放。
+窗口尺寸 960×600 适合本次板端 1024 宽桌面。远程 X11 的带宽和桌面尺寸另行影响显示速度。
+颜色偏绿尚未解决；本次未修改 ISP 颜色算法，可使用工程现有 `tools/aps_isp_tuner.py` 离线调参，需已确认的 CFA 和标定数据，不能保证通用白平衡恢复正确颜色。
 
-### 曝光命令为何报 chip identity mismatch
-
-手动控制之前的芯片检查错误地分别读了 `0x3428` 和 `0x3429` 两个 data8 寄存器。
-本地 3.4.1 官方 `vp_sensors/vp_sensors.c` 的 `read_chip_id` 对 APX003CC 调用的是
-`vp_i2c_read_reg16_data16`：写入地址 `0x3428` 后，在**同一次 I2C_RDWR 的 repeated-start
-读消息中取两个字节**，按大端合并，与 `0x0808` 比较。当前实现已与它一致。
-曝光/增益寄存器仍为 reg16/data8；非强占访问、总线/地址核对和错误中止仍保留。
-检查失败会打印实际 ID、期望 ID、总线、地址，且不会继续写曝光。
-此修复纠正了事务协议差异，实际板端读回及亮度响应仍需复测。
-
-```bash
-# 使用新目录，避免上次失败留下的目录与新会话混用
-python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/bright_100_fixed \
-  --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
-python3 hvs.py play --output /app/recordings/bright_100_fixed
-```
-
-上述 bus 6 / 7-bit addr 0x3c 对应用户当前板端日志，程序还会核对实际选中的传感器配置。
-正常检查日志应有 `APX003CC identity reg16/data16: 0x808`，随后必须通过曝光写入、
-读回和持续保持检查。不要用关闭身份检查或强制抢占 I2C 的办法绕过失败。
-
-### 偏绿图像：使用已有离线工具，不继续改播放器颜色代码
+## 偏绿图像：使用已有离线工具，不继续改播放器颜色代码
 
 这次没有修改 `aps_color.h`、`common/aps_core.h` 或默认 Bayer/WB 参数。现有软件预览
 没有完成实际 CFA、白平衡和 CCM 标定，不能保证可靠色彩。可使用工程已有
@@ -92,9 +48,8 @@ python3 tools/aps_isp_tuner.py process --input frame30.raw --width 1632 --height
 
 ## 已定位的事实与尚未完成的硬件验收
 
-2026-10-02 的代码调查与本地主机验证，**不是 X5 达到 30 FPS 的实测报告**。
-板端 `10.129.113.92` 未通过现有 SSH 认证；本机缺少可用的 Linux/X5 SDK 构建环境，
-Windows C++ 模拟构建已通过，生产 X5 目标仍须按下文构建验证。
+本节保留早期代码调查；最新 X5 实测见文首链接，不以早期未测说明覆盖实测结果。
+板端现已通过 SSH 认证并原生编译；Windows 模拟测试与 X5 实测分开报告。
 
 旧链路：`hvs.py` → `hv_hvs_record` → 版本锁定的 patched
 `libshimetapi_hv.so.2` → `MipiHvsDeviceImpl::readImageFrame` →
@@ -119,7 +74,7 @@ Windows C++ 模拟构建已通过，生产 X5 目标仍须按下文构建验证�
    RAW8 4096×256 传输包，事件坐标几何为 768×608。`240fps` 不是 APS 帧率。
    配置里的 framelenth=2582 与文档 VTS=3174 不一致，均不能直接当作已测行时序。
 5. 当前可定位到的边界是上述转换、额外复制、配对等待、最新帧派发及回调封装。
-   **尚未证明某一个环节就是 14～15 FPS 的唯一根因，也未证明传感器实际输出 30 FPS。**
+   **旧 SDK 成功路径的单一根因仍未证明；原生双 VIN 已实测约 29.79 APS 帧/秒，上游传感器漏帧仍不可观测。**
    新原生路径绕开这些环节；若 receive 对照仍约 15，则调查 VIN/驱动/双 VC/传感器，
    不再改 AVI 帧率或凭初始化日志声称解决。
 
@@ -191,7 +146,7 @@ python3 tools/apx003cc_diagnostics/runtime_inventory.py --pid 12345 \
 
 确认存在正确的 libcam/vpf/hbmem/传感器库路径，原生 recorder 不应加载 patched
 libshimetapi_hv。部署时保留新二进制、项目 `lib/x5`、匹配平台样例和 SDK。若跨编译，
-用可用的 Linux aarch64 sysroot/SDK 加 `--cross`；本次未交付未经验证的板端二进制。
+用可用的 Linux aarch64 sysroot/SDK 加 `--cross`；本板已原生编译验证，交叉编译产物仍须独立核对。
 
 ## 录制、停止、失败重试、回放
 
@@ -243,19 +198,15 @@ I2C_RDWR repeated-start 读取，大端寄存器地址字节。需要用户提�
 不扫描，不用 `I2C_SLAVE_FORCE`/`i2ctransfer -f`。若设备被内核独占，当前实现明确失败，
 需要厂商支持的手动接口或修正驱动，不能绕过占用。
 
-启动核对样例给出的 chip_id `0x0808`（`0x3428/0x3429`）和当前配置地址。给出的资料为 bus=6、
-7 位地址 0x3c；只有板端确认仍一致时才使用以下命令。
+启动先通过官方初始化前探测核对 0x3428 的 0808，再核对实际总线及 7 位地址。本板为 bus 6、0x3c。
+以下与实测成功命令的参数相同，输出目录必须未存在：
 
 ```bash
-# 明亮环境：100 行 + 最低增益
-python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/bright_100 --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-exposure-lines 100 --aps-gain-db 0
-
-# 固定场景、光圈、增益，分别采三档（目录必须是新目录）
-for lines in 20 100 500; do
-  python3 hvs.py record --x5-vin-bypass --storage memory --output "/app/recordings/exposure_${lines}" --seconds 5 --max-mib 1024 --i2c-bus 6 --aps-exposure-lines "$lines" --aps-gain-db 0
-done
-python3 tools/apx003cc_diagnostics/check_vin_recording.py /app/recordings/exposure_20 /app/recordings/exposure_100 /app/recordings/exposure_500
+python3 hvs.py record --x5-vin-bypass --storage memory --output /app/recordings/gain0_new --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-gain-db 0
+python3 hvs.py play --output /app/recordings/gain0_new --window-width 960 --window-height 600
 ```
+
+当前模式 `--aps-exposure-lines 100` 明确失败（015B 请求 64、读回 00），已移除原先错误地标为可用的明亮场景曝光命令。必须先由厂商确认本板模式的曝光寄存器及写入条件；不要绕过读回检查。
 
 曝光写 `0x015A` 低 4 位（保留高位）及 `0x015B`，范围 1～1162 行；增益写
 `0x3603=7`、`0x3660=1`、查表 `0x3602`、`0x3661=1`、`0x3662=0`；最后 latch
@@ -263,13 +214,13 @@ python3 tools/apx003cc_diagnostics/check_vin_recording.py /app/recordings/exposu
 
 `--aps-gain-db` 是模拟增益 dB，0～24，按最近 0.375 dB 量化，恰好半步向上。
 使用提供指南的 65 行模拟表，数字增益固定 1×；不补造“161 项”标题与实际 146 行之间
-缺失的条目，也不使用有歧义的 109/80 数字增益索引。该表及寄存器尚待现场成像验收。
+缺失的条目，也不使用有歧义的 109/80 数字增益索引。0、6、12 dB 已做板端读回与图像统计，其他档位尚未逐档实测。
 
 `--aps-exposure-us` 与 `--aps-exposure-lines` 互斥。微秒请求必须同时提供
 `--aps-line-time-us`，表示用户已用实际模式时钟/驱动或硬件测量验证的行时间；
 round(us/line_us)，越界报错，不暗中截断。程序读回 VTS 记录，但不由 VTS×名义 30 FPS
 自动推导。例：只有独立验证行时间确为 10.5 µs 时，才可将行数参数替换成
-`--aps-exposure-us 1050 --aps-line-time-us 10.5`。没有时序证据时使用行数。
+`--aps-exposure-us 1050 --aps-line-time-us 10.5`。当前板上行数写入也未验证通过，不能通过提供行时间绕过此限制。
 
 summary 分别记录请求、量化后提交、寄存器快照/保持检查、VTS；直接寄存器路径的 SDK
 配置读回写为 unavailable。均不关联具体帧，不能把寄存器配置读回叫作逐帧实际曝光。

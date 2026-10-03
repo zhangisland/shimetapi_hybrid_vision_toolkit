@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
     Shimeta::EvsTimestamp displayedTimestamp{};
     auto sensorForAps=[&](uint64_t index) {
         const auto ts=displayedTimestamp;
-        if(ts.valid) return ts.processed_timestamp?ts.processed_timestamp:ts.raw_timestamp/200;
+        if(usableSensorTimestamp(ts)) return ts.processed_timestamp?ts.processed_timestamp:ts.raw_timestamp/200;
         if(timeline.host) return timeline.time(index,video_cache.fps());
         if(has_ts_sync) return ts_sync.apsSensorUs(index);
         // Unknown offset: align recording starts explicitly, never compare
@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
                 }
                 if(!ready) {
                     ready=true;aps_frame_index=actual;resetClocks();reportStart=Clock::now();
-                    if(!timeline.host&&!has_ts_sync&&!displayedTimestamp.valid)
+                    if(!timeline.host&&!has_ts_sync&&!usableSensorTimestamp(displayedTimestamp))
                         std::cerr<<"SYNC fallback: recording starts aligned; original clock offset UNKNOWN. Keep native vin.frames.jsonl for host alignment.\n";
                 }
                 if(isApsAtKnownEnd(actual,video_cache)) {aps_playing=false;if(sync_enabled) evs_playing=false;}
@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         }
         const auto apsTs=sensorForAps(displayed_aps_index);
         std::string source="start aligned / approx";
-        if(displayedTimestamp.valid) source="AVI sensor tsmp";
+        if(usableSensorTimestamp(displayedTimestamp)) source="AVI sensor tsmp";
         else if(timeline.host) source="host bridge / approx";
         else if(has_ts_sync) source="CSV clock bridge";
         if(sync_enabled&&ready) evs_frame_index=evs_seq.frameIndexForTimestamp(apsTs,EvsStepMode::Single);
@@ -280,7 +280,8 @@ int main(int argc, char** argv) {
         else if(key==' ') g_pending_action=int(UiAction::ApsTogglePlay);
         else if(key=='a'||key=='A') g_pending_action=int(sync_enabled?UiAction::ApsPrev:UiAction::EvsPrev);
         else if(key=='d'||key=='D') g_pending_action=int(sync_enabled?UiAction::ApsNext:UiAction::EvsNext);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if(!ready || (!aps_playing && !evs_playing))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     cv::destroyAllWindows();
