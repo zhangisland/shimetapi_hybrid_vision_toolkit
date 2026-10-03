@@ -30,12 +30,7 @@ inline int exposureLines(double us, double lineUs) {
 using Registers=std::vector<std::pair<uint16_t,uint8_t>>;
 template<class IO> Registers apply(IO& io,int lines,double gain) {
  Registers regs;
- if(lines) {
-   if(lines<1||lines>1162) throw std::runtime_error("APS exposure outside 1..1162 lines");
-   // Preserve unrelated high nibble.
-   regs.push_back({0x015a,uint8_t((io.read(0x015a)&0xf0)|((lines>>8)&15))});
-   regs.push_back({0x015b,uint8_t(lines)});
- }
+ if(lines) throw std::runtime_error("APS exposure control unavailable in this HVS mode: 0x01xx is excluded by APX003CC_PRIOR_KNOWLEDGE.md; no sensor register was written");
  if(gain>=0) {
    const int i=gainIndex(gain);
    regs.insert(regs.end(),{{0x3603,7},{0x3660,1},{0x3602,analog[i]}, {0x3661,1},{0x3662,0}});
@@ -50,6 +45,9 @@ template<class IO> Registers apply(IO& io,int lines,double gain) {
  return regs;
 }
 template<class IO> void verify(IO& io,const Registers& regs) {
- for(auto r:regs) if(io.read(r.first)!=r.second) throw std::runtime_error("APS settings overwritten during capture");
+ for(auto r:regs) {const auto actual=io.read(r.first);if(actual!=r.second) {
+  std::ostringstream msg;msg<<"APS settings overwritten during capture: reg=0x"<<std::hex<<r.first<<" expected=0x"<<unsigned(r.second)<<" read=0x"<<unsigned(actual);
+  throw std::runtime_error(msg.str());
+ }}
 }
 }

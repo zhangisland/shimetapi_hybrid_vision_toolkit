@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-#!/bin/bash
 WINDOW_WIDTH=1280
 WINDOW_HEIGHT=720
 OUTPUT=""

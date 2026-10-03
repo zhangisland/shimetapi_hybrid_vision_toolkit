@@ -107,16 +107,17 @@ int main(int argc, char** argv) {
     std::cout<<"APS display preview scale="<<isp.previewScale<<"; full-resolution input unchanged; precache="<<precache<<std::endl;
     // ---- 加载 EVS ----
     EvsFrameSequence evs_seq;
-    if (!evs_seq.open(raw_path)) return 1;
+    try {if (!evs_seq.open(raw_path)) return 1;}catch(const std::exception& e){std::cerr<<e.what()<<std::endl;return 1;}
     std::cout<<"EVS startup seconds="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-launched).count()<<std::endl;
 
     // ---- 加载 APS ----
     ApsFrameCache video_cache;
     video_cache.setIsp(isp);
-    if (!video_cache.open(avi_path, fallback_fps,precache && isp.pattern!="none")) {
+    try {if (!video_cache.open(avi_path, fallback_fps,precache && isp.pattern!="none")) {
         std::cerr << "Failed to open AVI: " << avi_path << std::endl;
         return 1;
     }
+    }catch(const std::exception& e){std::cerr<<e.what()<<std::endl;return 1;}
     TimestampSyncMap ts_sync;
     bool has_ts_sync = ts_sync.open(raw_path, avi_path);
 

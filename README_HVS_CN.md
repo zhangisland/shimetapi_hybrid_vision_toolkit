@@ -12,8 +12,8 @@ git clone https://github.com/zhangisland/shimetapi_hybrid_vision_toolkit # 我�
 ./run.sh build x5 
 
 # 部署代码后，修改代码重新build
-python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot
-#  --sdk-include-dir /usr/include
+python3 hvs.py build --with-vin-record --with-player --platform-samples /app/multimedia_samples --sdk-root /usr/hobot --sdk-include-dir /usr/include --jobs 2
+
 ```
 > 如果后续运行代码提示缺libxxx, 可能需要的:
 > `export LD_LIBRARY_PATH=/app/shimetapi_hybrid_vision_toolkit/lib/x5${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`
@@ -24,52 +24,57 @@ python3 hvs.py build --with-vin-record --with-player --platform-samples /app/mul
 ### 2.0 显示实时画面 preview
 
 ```bash
-# 1. 录制 record
 cd /app/shimetapi_hybrid_vision_toolkit
+# 实时预览，不保存录像，先预览一下当前aps-gain-db设置下的画面效果；q / Esc 退出
+python3 hvs.py live --x5-vin-bypass --  --aps-gain-db 0 --i2c-bus 6 --preview-width 960
 
-## 现在是通过 --storage 先写到memory 再转到disk, 一段5s 150帧的avi需要大约110s才能转化完存储到硬盘, 有点耽误时间
-## 通过 --aps-gain-db 调整曝光增益, 范围 0-12 dB
-python3 hvs.py record --x5-vin-bypass --storage memory --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-gain-db 0  --output /app/recordings/gain0_new
+# 或者通过scripts执行
+bash scripts/live.sh --preview-width 960 --aps-gain-db 0 
 
-## 或者是通过 scripts/record.sh
-# bash scripts/record.sh --output /app/recordings/gain0_new --seconds 5
 ```
 
 
 ### 2.1 录制 record
 ```bash
-# 1. 录制 record
 cd /app/shimetapi_hybrid_vision_toolkit
 
-## 现在是通过 --storage 先写到memory 再转到disk, 一段5s 150帧的avi需要大约110s才能转化完存储到硬盘, 有点耽误时间
-## 通过 --aps-gain-db 调整曝光增益, 范围 0-12 dB
-python3 hvs.py record --x5-vin-bypass --storage memory --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-gain-db 0  --output /app/recordings/gain0_new
+# 现在是通过 --storage 先写到memory 再转到disk, 一段5s 150帧的avi需要大约110s才能转化完存储到硬盘, 有点耽误时间
+# 通过 --aps-gain-db 调整曝光增益, 范围 0-12 dB
+# 如果要快速保存就需要将 --save-format 设置为 fast
+python3 hvs.py record --x5-vin-bypass --storage memory --seconds 5 --max-mib 1024 --i2c-bus 6 --i2c-address 0x3c --aps-gain-db 0  --output /app/recordings/gain0_new --save-format fast
 
 ## 或者是通过 scripts/record.sh
-# bash scripts/record.sh --output /app/recordings/gain0_new --seconds 5
+bash scripts/record.sh --output /app/recordings/gain0_new --seconds 5
 ```
 
 ### 2.2 回放 play
 ```bash
 cd /app/shimetapi_hybrid_vision_toolkit
 
-## 目前需要将整段aps.avi缓存以后才能开始播放, 一段150帧的视频需要先缓存大约100秒才能播放
+# 直接回放压缩会话，无需先导出 AVI
+# 兼容原先的不带 --save-format fast 录制的数据
 python3 hvs.py play --window-width 1280 --window-height 720 --output /app/recordings/gain0_new 
 
 ## 或者是通过 scripts/play.sh
-# bash scripts/play.sh --output /app/recordings/gain0_new
+bash scripts/play.sh --output /app/recordings/gain0_new
 ```
 
 
-### 2.3 采集后的数据处理 events.raw -> events.npz
+### 2.3 采集后的数据处理 aps/evs.vin.zst -> aps.avi + event.raw + evs/aps.vin.bin 以及 events.raw -> events.npz
 ```bash
-# 1. event raw 转 npz (为了减少文件大小)
+# 1. 随时导出原有四文件，源压缩会话保留
+## 如果 record 的时候采用了 **--save-format fast 参数**，则需要进行以下转换，将 2个文件 `aps.vin.zst`和`evs.vin.zst`导出为 4个文件 `aps.vin.bin, evs.vin.bin, aps.avi, events.raw`
+python3 hvs.py export-recording --max-mib 1024 --input /app/recordings/fast_new --output /app/recordings/fast_new_export
+bash scripts/export_raw_in_fast_mode.sh --input /app/recordings/fast_new --output /app/recordings/fast_new_export 
+
+
+# 2. event raw 转 npz (为了减少文件大小)
 ## 一个原本 149M 的events.raw，转为csv文件大小是 199M, 而转为npz后文件大小 18M，文件大小减少 90%
 ## 会显示进度条
 python3 hvs.py export-npz --input events.raw --output events.npz
 
 # 或者是用script，直接指定包含events.raw的目录, 对应转换的npz将保存到events.raw所在目录
-bash scripts/events_to_npz.sh /app/recordings/gain0_new/
+bash scripts/events_to_npz.sh /app/recordings/fast_new_export/
 ```
 
 

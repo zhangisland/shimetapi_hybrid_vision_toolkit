@@ -1,0 +1,12 @@
+# Optional archive support; legacy four-file recording remains available without it.
+function(hvs_enable_zstd target)
+ find_path(HVS_ZSTD_INCLUDE zstd.h)
+ find_library(HVS_ZSTD_LIBRARY NAMES zstd libzstd)
+ if(HVS_ZSTD_INCLUDE AND HVS_ZSTD_LIBRARY)
+  target_compile_definitions(${target} PRIVATE HVS_HAVE_ZSTD=1)
+  target_include_directories(${target} PRIVATE "${HVS_ZSTD_INCLUDE}")
+  target_link_libraries(${target} PRIVATE "${HVS_ZSTD_LIBRARY}")
+ else()
+  message(STATUS "${target}: zstd unavailable; --save-format fast and archive replay disabled")
+ endif()
+endfunction()

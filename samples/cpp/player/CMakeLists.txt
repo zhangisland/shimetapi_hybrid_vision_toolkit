@@ -39,3 +39,8 @@ if(TARGET hv_sample_player)
     find_package(Threads REQUIRED)
     target_link_libraries(hv_sample_player PRIVATE Threads::Threads)
 endif()
+
+if(TARGET hv_sample_player)
+ include("${CMAKE_CURRENT_LIST_DIR}/../common/Zstd.cmake")
+ hvs_enable_zstd(hv_sample_player)
+endif()

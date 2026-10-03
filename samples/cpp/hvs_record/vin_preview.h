@@ -79,13 +79,13 @@ static int previewVin(const Options& o) {
    cv::putText(canvas,timing.str(),{8,h+50},cv::FONT_HERSHEY_SIMPLEX,.42,{255,255,255},1);
    cv::imshow("HVS VIN preview - NO RECORDING",canvas);++shown;
   }
-  if(ns()-verify>=1000000000ULL){if(sensor)apx::verify(*sensor,regs);verify=ns();}
-  if(ns()-report>=1000000000ULL){const auto tick=ns();evsRate=double(evsTotal-evsRateMark)*1e9/double(tick-evsRateTime);evsRateMark=evsTotal;evsRateTime=tick;std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<" evs_events_per_s="<<uint64_t(evsRate)<<std::endl;report=ns();}
+  if(o.verifyRegs&&ns()-verify>=1000000000ULL){if(sensor)apx::verify(*sensor,regs);verify=ns();}
+  if(ns()-report>=1000000000ULL){const auto tick=ns();evsRate=double(evsTotal-evsRateMark)*1e9/double(tick-evsRateTime);evsRateMark=evsTotal;evsRateTime=tick;std::cout<<"Preview APS received="<<counts[1]<<" EVS packets="<<counts[0]<<" displayed="<<shown<<" superseded APS previews="<<dropped<<" raw_mean="<<rawMean<<" raw_sat_percent="<<rawSaturation<<" evs_events_per_s="<<uint64_t(evsRate)<<" evs_event_scope=displayed_packets_only"<<std::endl;report=ns();}
   if(ns()-begin>uint64_t(o.timeout*1e9)&&(!counts[0]||!counts[1]))throw std::runtime_error("Preview stream absent");
   const int key=cv::waitKey(1)&255;if(key==27||key=='q')break;
  }
  } catch(...){cv::destroyAllWindows();throw;}
- stop=true;evs.join();aps.join();if(sensor)apx::verify(*sensor,regs);cv::destroyAllWindows();
+ stop=true;evs.join();aps.join();if(o.verifyRegs&&sensor)apx::verify(*sensor,regs);cv::destroyAllWindows();
  for(const auto& error:failures)if(!error.empty())throw std::runtime_error(error);
  std::cout<<"Preview stopped: APS="<<counts[1]<<" EVS packets="<<counts[0]<<" get errors="<<errors[1]<<'/'<<errors[0]<<"; no recording saved"<<std::endl;
  return 0;

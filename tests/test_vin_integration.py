@@ -120,3 +120,46 @@ class VinIntegration(unittest.TestCase):
             (folder/'retry.request').touch()
             self.assertEqual(p.wait(20), 0)
             self.assertEqual(self.summary(folder)['status'], 'complete')
+
+    @unittest.skipUnless(os.environ.get('HVS_ARCHIVE_TESTS'), 'zstd build required')
+    def test_lossless_archive_export_and_corruption(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, source, _ = self.start(tmp, ['--save-format','fast'])
+            self.assertEqual(proc.wait(20),0,Path(tmp,'log.txt').read_text())
+            self.assertEqual(self.summary(source)['session_format'],'vin_zstd_v1')
+            self.assertFalse((source/'aps.avi').exists())
+            payloads=['aps.vin.zst','evs.vin.zst','vin.frames.jsonl']
+            original={n:hashlib.sha256((source/n).read_bytes()).hexdigest() for n in payloads}
+            output=Path(tmp)/'exported'
+            result=subprocess.run([EXE,'--export-session',str(source),'--output',str(output),'--max-mib','64'],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertEqual(self.summary(output)['session_format'],'legacy_four_files')
+            for n in ['aps.vin.bin','evs.vin.bin','events.raw','aps.avi']:
+                self.assertGreater((output/n).stat().st_size,0)
+            rows=[json.loads(line) for line in (output/'vin.frames.jsonl').read_text().splitlines()]
+            with (output/'aps.vin.bin').open('rb') as raw:
+                for row in rows:
+                    if row['stream']=='aps':
+                        raw.seek(row['offset']);self.assertEqual(raw.read(2),bytes([row['frame_id']&255,0]))
+            self.assertEqual(original,{n:hashlib.sha256((source/n).read_bytes()).hexdigest() for n in payloads})
+            first=next(json.loads(line) for line in (source/'vin.frames.jsonl').read_text().splitlines() if '"aps"' in line)
+            file=source/'aps.vin.zst';data=bytearray(file.read_bytes());data[first['archive_offset']+first['archive_bytes']//2]^=1;file.write_bytes(data)
+            failed=Path(tmp)/'corrupted_export'
+            result=subprocess.run([EXE,'--export-session',str(source),'--output',str(failed),'--max-mib','64'],capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertFalse((failed/'summary.txt').exists())
+
+    @unittest.skipUnless(os.environ.get('HVS_ARCHIVE_TESTS'), 'zstd build required')
+    def test_fast_save_retry_retains_ram(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc,folder,_=self.start(tmp,['--save-format','fast','--warmup','0.5'])
+            until=time.monotonic()+10
+            while not folder.exists() and time.monotonic()<until:time.sleep(.01)
+            blocker=folder/'saving.partial';blocker.write_text('block saving')
+            while 'SAVE FAILED' not in Path(tmp,'log.txt').read_text() and time.monotonic()<until:time.sleep(.02)
+            self.assertIn('SAVE FAILED',Path(tmp,'log.txt').read_text())
+            self.assertIsNone(proc.poll());self.assertFalse((folder/'summary.txt').exists())
+            blocker.unlink();(folder/'retry.request').touch()
+            self.assertEqual(proc.wait(20),0,Path(tmp,'log.txt').read_text())
+            self.assertEqual(self.summary(folder)['session_format'],'vin_zstd_v1')

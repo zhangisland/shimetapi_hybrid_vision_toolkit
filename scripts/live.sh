@@ -1,55 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
-#!/bin/bash
-PROFILE=1
-APS_EXPOSURE_US=1000
-APS_GAIN=1
-APS_DGAIN=1
-SYNC_TOLERANCE_MS=25
-SYNC_WAIT_MS=40
+
+I2C_BUS=6
+PREVIEW_WIDTH=1280
+APS_GAIN_DB=0
 
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --profile)
-            PROFILE="$2"; shift 2
+    case "$1" in        
+        --i2c-bus)
+            I2C_BUS="$2"; shift 2
             ;;
-        --aps-exposure-us)
-            APS_EXPOSURE_US="$2"; shift 2
+        --preview-width)
+            PREVIEW_WIDTH="$2"; shift 2
             ;;
-        --aps-gain)
-            APS_GAIN="$2"; shift 2
-            ;;
-        --aps-dgain)
-            APS_DGAIN="$2"; shift 2
-            ;;
-        --sync-tolerance-ms)
-            SYNC_TOLERANCE_MS="$2"; shift 2
-            ;;
-        --sync-wait-ms)
-            SYNC_WAIT_MS="$2"; shift 2
+        --aps-gain-db)
+            APS_GAIN_DB="$2"; shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--profile N] [--aps-exposure-us US] [--aps-gain G] [--aps-dgain G] [--sync-tolerance-ms MS] [--sync-wait-ms MS]"
-            echo "  --profile N              profile id (default: 1)"
-            echo "  --aps-exposure-us US     APS exposure in microseconds (default: 1000)"
-            echo "  --aps-gain G             APS analog gain (default: 1)"
-            echo "  --aps-dgain G            APS digital gain (default: 1)"
-            echo "  --sync-tolerance-ms MS   sync tolerance (default: 25)"
-            echo "  --sync-wait-ms MS        sync wait (default: 40)"
+            echo "Usage: $0 [--i2c-bus N] [--preview-width PREVIEW_WIDTH] [--aps-gain-db DB]"
+            echo "  --i2c-bus N             I2C bus number (default: 6)"
+            echo "  --preview-width PREVIEW_WIDTH   preview player width (default: 1280)"
+            echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
             exit 0
             ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "Usage: $0 [--profile N] [--aps-exposure-us US] [--aps-gain G] [--aps-dgain G] [--sync-tolerance-ms MS] [--sync-wait-ms MS]" >&2
+            echo "Usage: $0 [--i2c-bus N] [--preview-width PREVIEW_WIDTH] [--aps-gain-db DB]" >&2
             exit 1
             ;;
     esac
 done
 
-python3 hvs.py live -- \
-    --profile "$PROFILE" \
-    --aps-exposure-us "$APS_EXPOSURE_US" \
-    --aps-gain "$APS_GAIN" \
-    --aps-dgain "$APS_DGAIN" \
-    --sync-tolerance-ms "$SYNC_TOLERANCE_MS" \
-    --sync-wait-ms "$SYNC_WAIT_MS"
+ARGS=(--i2c-bus "$I2C_BUS" --preview-width "$PREVIEW_WIDTH" --aps-gain-db "$APS_GAIN_DB")
+
+
+# python3 hvs.py live --x5-vin-bypass --  --aps-gain-db 0 --i2c-bus 6 --preview-width 960
+python3 hvs.py live --x5-vin-bypass -- "${ARGS[@]}"

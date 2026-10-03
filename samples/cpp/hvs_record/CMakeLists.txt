@@ -19,8 +19,10 @@ if(HV_X5_VIN_RECORD)
     if(NOT _vin_sensors OR NOT EXISTS "${_dual}/src/hvs_config.c")
         message(FATAL_ERROR "Missing matching platform sensor configuration sources")
     endif()
+    include("${CMAKE_CURRENT_LIST_DIR}/../common/Zstd.cmake")
     add_executable(hv_hvs_record_vin vin_record.cpp ../live_record_display/x5_capture.c
         "${_dual}/src/hvs_config.c" ${_vin_sensors})
+    hvs_enable_zstd(hv_hvs_record_vin)
     target_compile_definitions(hv_hvs_record_vin PRIVATE X5_RAW_ONLY=1)
     target_include_directories(hv_hvs_record_vin PRIVATE ${_vin_includes}
         "${HV_PLATFORM_SAMPLES}/vp_sensors" "${_dual}/include")

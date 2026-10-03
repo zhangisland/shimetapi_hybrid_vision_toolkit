@@ -6,7 +6,28 @@
 namespace fake_player {extern std::atomic<int> delayMs,reads;}
 using namespace hv_player;
 using Clock=std::chrono::steady_clock;
+static void archivePlaybackContract() {
+#ifdef HVS_HAVE_ZSTD
+    const auto folder=std::filesystem::temp_directory_path()/("hvs-archive-player-"+std::to_string(Clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(folder);
+    std::vector<uint8_t> raw(3280*1224,0xee),gray(1632*1224),packed;
+    for(size_t y=0;y<1224;++y)for(size_t x=0;x<1632;++x){const unsigned v=(x*13+y*7)%1024;raw[y*3280+2*x]=v&255;raw[y*3280+2*x+1]=v>>8;gray[y*1632+x]=v>>2;}
+    {
+        std::ofstream out(folder/"aps.vin.zst",std::ios::binary),meta(folder/"vin.frames.jsonl");
+        out.write(hv_archive::magic,8);hv_archive::Compressor compressor;const auto n=compressor.compress(raw.data(),raw.size(),packed);
+        for(size_t i=0;i<3;++i){hv_archive::Entry e{};e.bytes=raw.size();e.hostNs=1000000000+i*33333333;e.width=1632;e.height=1224;e.stride=3280;e.format=0x2b;e.offset=i*raw.size();e.archiveOffset=8+i*n;e.compressedBytes=n;hv_archive::metadata(meta,e,true,0);out.write(reinterpret_cast<const char*>(packed.data()),n);}
+    }
+    {
+        VideoReader reader;ApsIsp isp;isp.pattern="gbrg";isp.previewScale=4;reader.setIsp(isp);assert(reader.open((folder/"aps.vin.zst").string(),30));
+        Shimeta::Frame f{};f.width=1632;f.height=1224;f.format=Shimeta::PixelFormat::Gray8;f.aps={gray.data(),gray.size()};
+        for(uint64_t index:{0,1,0,2}){cv::Mat actual;assert(reader.readFrameAt(index,actual));const auto expected=isp.process(f);assert(cv::norm(actual,expected,cv::NORM_INF)==0);}
+        cv::Mat end;assert(!reader.readFrameAt(3,end));
+    }
+    std::filesystem::remove(folder/"aps.vin.zst");std::filesystem::remove(folder/"vin.frames.jsonl");std::filesystem::remove(folder);
+#endif
+}
 int main(int argc,char** argv) {
+    archivePlaybackContract();
     Shimeta::EvsTimestamp zeroTimestamp{};
     zeroTimestamp.valid=true;
     assert(!usableSensorTimestamp(zeroTimestamp));

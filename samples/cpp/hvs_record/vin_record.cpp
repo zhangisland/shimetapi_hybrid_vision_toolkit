@@ -31,22 +31,26 @@ static uint64_t ns() {return std::chrono::duration_cast<std::chrono::nanoseconds
 static volatile std::sig_atomic_t interrupted=0;
 static void signalStop(int) {interrupted=1;}
 struct Options {
- fs::path output;
+ fs::path output,exportSession;
  double seconds=0,warmup=1,timeout=10,stall=2,us=0,lineUs=0,gain=-1;
  size_t maxBytes=1024ULL<<20;
  int lines=0,bus=-1,address=0x3c,profile=1;
- std::string diagnostic="record",previewBayer="gbrg";
+ std::string diagnostic="record",previewBayer="gbrg",saveFormat="full";
  bool preview=false;int previewWidth=960,previewScale=4;
+ bool verifyRegs=true; // watchdog: re-read applied registers every second; disable with --no-verify for I2C probing
 };
 static Options parse(int argc,char** argv) {
  Options o;
  for(int i=1;i<argc;++i) {
    std::string k=argv[i];
    if(k=="--preview") {o.preview=true;continue;}
-   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--aps-exposure-lines 100 | --aps-exposure-us 1000 --aps-line-time-us VERIFIED] [--aps-gain-db 0] --i2c-bus VERIFIED\n"; std::exit(0);}
+   if(k=="--no-verify") {o.verifyRegs=false;continue;}
+   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
    std::string v=argv[++i];
    if(k=="--aps-bayer") {if(v!="none"&&v!="gbrg"&&v!="rggb"&&v!="bggr"&&v!="grbg")throw std::runtime_error("Invalid preview Bayer pattern");o.previewBayer=v;continue;}
+   if(k=="--export-session") {o.exportSession=v;continue;}
+   if(k=="--save-format") {if(v!="fast"&&v!="full")throw std::runtime_error("save-format fast|full");o.saveFormat=v;continue;}
    if(k=="--output") {o.output=v;continue;}
    if(k=="--storage") {if(v!="memory") throw std::runtime_error("native VIN requires --storage memory; legacy SDK provides disk baseline");continue;}
    if(k=="--ram-dir") continue; // deprecated compatibility; no tmpfs is used
@@ -76,7 +80,7 @@ static Options parse(int argc,char** argv) {
  }
  if((o.output.empty()&&!o.preview)||o.timeout<=0||o.stall<=0) throw std::runtime_error("output and positive timeouts required");
  if(o.lines&&o.us) throw std::runtime_error("exposure lines and microseconds are mutually exclusive");
- if(o.us) o.lines=apx::exposureLines(o.us,o.lineUs);
+ if(o.us||o.lines) throw std::runtime_error("APS exposure control is not verified for HVS mode; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md");
  if((o.lines||o.gain>=0)&&o.bus<0) throw std::runtime_error("Manual control requires explicit --i2c-bus from board configuration (no scanning)");
  if(o.diagnostic!="record"&&o.diagnostic!="receive"&&o.diagnostic!="copy") throw std::runtime_error("Unknown diagnostic mode");
  return o;
@@ -281,7 +285,7 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
  for(auto name:{"vin.frames.jsonl","events.raw","aps.avi"}) RecordingStorage::syncFile(stage/name);
  syncNs+=ns()-finalSync;
  std::ofstream summary(stage/"summary.txt",std::ios::trunc);
- summary<<report<<"aps_frames="<<aps<<"\nevs_packets="<<evs<<"\naps_observed_fps="<<fps
+ summary<<report<<"session_format=legacy_four_files\naps_frames="<<aps<<"\nevs_packets="<<evs<<"\naps_observed_fps="<<fps
    <<"\naps_width=1632\naps_height=1224\nevs_width=768\nevs_height=608\ngray8_frames="<<aps
    <<"\naps_paired_timestamps=0\naps_storage_format=RAW10_16LE_with_stride_and_NV12_preview"
    <<"\nraw10_words_outside_10bits="<<invalid<<"\npreview_layout_status="<<(invalid?"UNVERIFIED_do_not_use_preview_for_photometry":"matches_bundled_SDK_word_shift_2")
@@ -305,6 +309,7 @@ static void save(const Options& o,const MemoryArena& arena,double fps,const std:
  std::cout<<"Saved and byte-verified in "<<(ns()-begin)/1e9<<" seconds\n";
 }
 
+#include "vin_archive_save.h"
 static int run(const Options& o) {
  const size_t capacity=MemoryArena::payloadCapacity(o.maxBytes,RecordingStorage::availableMemory());
  if(!fs::create_directory(o.output)) throw std::runtime_error("Output must be a new directory");
@@ -341,7 +346,7 @@ static int run(const Options& o) {
    uint8_t initializedId[2]{};sensor->readBytes(0x3428,initializedId,2);
    const auto chipId=(uint16_t(initializedId[0])<<8)|initializedId[1];postInitStatus=chipId;
    std::cout<<"APX003CC post-init 0x3428 snapshot (identity verified BEFORE init): 0x"<<std::hex<<chipId<<std::dec<<std::endl;
-   vts=(int(sensor->read(0x0160))<<8)|sensor->read(0x0161);
+   // 0x01xx is excluded in the current HVS mode; do not re-probe VTS there.
    regs=apx::apply(*sensor,o.lines,o.gain);
    std::cout<<"APS control after both streams started: lines="<<o.lines<<" gain_dB="<<(o.gain>=0?apx::gainIndex(o.gain)*0.375:-1)<<" VTS="<<vts<<" registers verified; NOT per-frame exposure\n";
  }
@@ -394,13 +399,13 @@ static int run(const Options& o) {
      // A producer may publish a timestamp newer than this monitor iteration.
      if(now>reference&&double(now-reference)/1e9>(last&&i?o.stall:o.timeout)) throw std::runtime_error(i?"APS VIN stalled":"EVS VIN stalled");
    }
-   if(sensor&&now>=nextVerify) {apx::verify(*sensor,regs);nextVerify=now+1000000000ULL;}
+   if(sensor&&o.verifyRegs&&now>=nextVerify) {apx::verify(*sensor,regs);nextVerify=now+1000000000ULL;}
    std::this_thread::sleep_for(std::chrono::milliseconds(10));
  }
  } catch(const std::exception& e) {error=e.what();}
  const uint64_t stopped=std::min(ns(),end);
  stop=true;evs.join();aps.join(); // no DMA leases survive these joins
- if(sensor) {try {apx::verify(*sensor,regs);} catch(const std::exception& e) {error+=e.what();}}
+ if(sensor&&o.verifyRegs) {try {apx::verify(*sensor,regs);} catch(const std::exception& e) {error+=e.what();}}
  owner.reset();sensor.reset(); // stop hardware before any bulk output
  for(auto& e:errors) if(!e.empty()) error+="; "+e;
  if(full) reason="capacity";
@@ -430,7 +435,7 @@ static int run(const Options& o) {
    std::cout<<"Diagnostic only: payload intentionally discarded; no complete recording marker\n";
  } else {
    for(;;) {
-     try {save(o,arena,stats[1].fps(),report.str());break;}
+     try {if(o.saveFormat=="fast")saveFast(o,arena,stats[1].fps(),report.str());else save(o,arena,stats[1].fps(),report.str());break;}
      catch(const std::exception& e) {
        std::cerr<<"SAVE FAILED: "<<e.what()<<"\nAll input retained in this process. Repair destination, then: touch '"<<(o.output/"retry.request").string()<<"'\nDo NOT kill the process; pure RAM cannot survive power loss/SIGKILL.\n";
        // Signals do not discard the sole copy. A filesystem request retries
@@ -447,7 +452,11 @@ static int run(const Options& o) {
  return error.empty()?0:2;
 }
 int main(int argc,char** argv) {
- try {const auto options=parse(argc,argv);if(options.preview) {
+ try {const auto options=parse(argc,argv);if(!options.exportSession.empty())return exportFast(options);
+#ifndef HVS_HAVE_ZSTD
+ if(options.saveFormat=="fast")throw std::runtime_error("Fast save requires a zstd-enabled build");
+#endif
+ if(options.preview) {
 #ifdef HVS_VIN_PREVIEW
    return previewVin(options);
 #else

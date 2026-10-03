@@ -29,6 +29,13 @@ std::atomic<int>      g_pending_action{static_cast<int>(UiAction::None)};
 // VideoReader
 // ============================================================================
 bool VideoReader::open(const std::string& path, double fallback_fps) {
+    if(archiveNext_.valid()) {archiveNext_.wait();archiveNext_={};}
+    archive_.reset();
+    if(hv_archive::isArchive(path)) {
+        archive_=std::make_shared<hv_archive::Reader>();archive_->open(path);
+        fps_=archive_->fps();total_frames_=archive_->size();fallback_fps_=fallback_fps;
+        current_index_=processed_=0;return true;
+    }
     reader_ = std::make_unique<Shimeta::io::HybridReader>();
     if (!reader_->open("", path)) return false;
     fps_ = reader_->apsFps();
@@ -43,6 +50,28 @@ uint64_t VideoReader::totalFrameCount() const { return total_frames_; }
 
 /** @brief 顺序读到目标索引，NV12 原始字节 → BGR（工具包零 OpenCV 依赖）。 */
 bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::EvsTimestamp* timestamp) {
+    if(archive_) {
+        if(target_index>=archive_->size())return false;
+        const auto start=std::chrono::steady_clock::now();
+        bool prefetched=false;
+        if(archiveNext_.valid()) {auto bytes=archiveNext_.get();if(archiveNextIndex_==target_index){archiveRaw_=std::move(bytes);prefetched=true;}}
+        if(!prefetched)archive_->read(target_index,archiveRaw_);
+        const auto& e=archive_->entry(target_index);
+        if(target_index+1<archive_->size()) {
+            archiveNextIndex_=target_index+1;auto reader=archive_;const auto index=archiveNextIndex_;
+            archiveNext_=std::async(std::launch::async,[reader,index]{std::vector<uint8_t> bytes;reader->read(index,bytes);return bytes;});
+        }
+        const auto decoded=std::chrono::steady_clock::now();
+        const int scale=isp_.pattern=="none"?1:isp_.previewScale;
+        const size_t w=(e.width/scale)&~size_t(1),h=(e.height/scale)&~size_t(1);
+        archiveGray_.resize(w*h);
+        for(size_t y=0;y<h;++y)for(size_t x=0;x<w;++x){const auto* p=archiveRaw_.data()+((y/2)*2*scale+(y&1))*e.stride+((x/2)*2*scale+(x&1))*2;const unsigned word=p[0]|(unsigned(p[1])<<8);archiveGray_[y*w+x]=uint8_t(std::min(word>>2,255u));}
+        Shimeta::Frame f{};f.width=int(w);f.height=int(h);f.format=Shimeta::PixelFormat::Gray8;f.aps={archiveGray_.data(),archiveGray_.size()};
+        const auto converted=std::chrono::steady_clock::now();
+        current_frame_=isp_.processFull(f);frame=current_frame_.clone();++processed_;current_index_=target_index+1;
+        if(processed_<=3)std::cout<<"Archive APS stage ms read+decompress="<<std::chrono::duration<double,std::milli>(decoded-start).count()<<" raw-to-gray="<<std::chrono::duration<double,std::milli>(converted-decoded).count()<<" ISP="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-converted).count()<<std::endl;
+        if(timestamp)*timestamp={};return true;
+    }
     if (target_index < current_index_) return false;
     while (current_index_ <= target_index) {
         Shimeta::Frame f;
@@ -153,7 +182,7 @@ void ApsFrameCache::decodeLoop() {
                 ok=std::fread(frame.data,1,bytes,preview_)==bytes;timestamp=entry.timestamp;
                 }
             } else ok=reader_.readFrameAt(target,frame,&timestamp);
-        } catch(const std::exception& e) {std::cerr<<"APS playback decode: "<<e.what()<<std::endl;}
+        } catch(const std::exception& e) {std::lock_guard<std::mutex> lock(mutex_);error_=std::string("APS playback decode: ")+e.what();return;}
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if(!ok) {exhausted_=true;total_=next;pending_=false;continue;}
@@ -199,7 +228,10 @@ size_t ApsFrameCache::cachedFrameCount() const {std::lock_guard<std::mutex> lock
 /** @brief 用公有 HybridReader 读 EVS 原始字节，MipiRaw8 逐包解码，每 4 子帧合成 1 极性帧。 */
 bool EvsFrameSequence::open(const std::string& filename) {
     Shimeta::io::HybridReader reader;
-    if (!reader.open(filename, "")) {
+    hv_archive::Reader archive;std::vector<uint8_t> archiveBytes;size_t archiveIndex=0;
+    const bool compressed=hv_archive::isArchive(filename);
+    if(compressed)archive.open(filename);
+    if (!compressed && !reader.open(filename, "")) {
         std::cerr << "无法打开事件文件: " << filename << std::endl;
         return false;
     }
@@ -218,7 +250,14 @@ bool EvsFrameSequence::open(const std::string& filename) {
     Shimeta::codec::MipiRaw8Decoder decoder;
     Shimeta::Frame f;size_t packets=0,events=0;
     constexpr size_t subBytes=Shimeta::codec::MipiRaw8Layout::kSubframeBytes;
-    while(reader.readEvsPacket(f)) {
+    auto nextPacket=[&]() {
+        if(!compressed)return reader.readEvsPacket(f);
+        if(archiveIndex>=archive.size())return false;
+        archive.read(archiveIndex,archiveBytes);const auto& e=archive.entry(archiveIndex++);
+        if(e.stride!=e.width){std::vector<uint8_t> packed(size_t(e.width*e.height));for(size_t y=0;y<e.height;++y)std::memcpy(packed.data()+y*e.width,archiveBytes.data()+y*e.stride,size_t(e.width));archiveBytes.swap(packed);}
+        f.evs={archiveBytes.data(),size_t(e.width*e.height)};return true;
+    };
+    while(nextPacket()) {
         if(f.evs.size%(4*subBytes)) {std::cerr<<"Incomplete EVS transport group\n";return false;}
         std::vector<uint8_t> restored;
         const uint8_t* payload=f.evs.data;
@@ -787,6 +826,18 @@ void printUsage(const char* prog) {
 
 bool dumpTimestamps(const std::string& raw_path, const std::string& avi_path,
                     std::ostream& out) {
+    if (std::filesystem::path(avi_path).extension()==".zst") {
+        try {
+            out << "stream,packet_index,vin_timestamp,host_receive_ns,source\n";
+            for (const auto& path : {raw_path,avi_path}) {
+                hv_archive::Reader reader;reader.open(path);
+                for(size_t i=0;i<reader.size();++i) {const auto& e=reader.entry(i);
+                    out << (path==avi_path?"APS":"EVS") << ',' << i << ',' << e.vinTimestamp << ',' << e.hostNs << ",VIN_metadata_not_exposure_time\n";
+                }
+            }
+            return true;
+        } catch(const std::exception& e) {std::cerr<<e.what()<<std::endl;return false;}
+    }
     out << "stream,packet_index,subframe_index,raw_timestamp,processed_timestamp_us,valid\n";
 
     Shimeta::io::HybridReader evs_reader;

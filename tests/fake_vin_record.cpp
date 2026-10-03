@@ -12,7 +12,7 @@
 #include <vector>
 #include <stdexcept>
 struct x5_capture {int count[2]={};std::atomic<int> leases{0};};
-static bool captureClosed=false;
+static bool captureClosed=true;
 int x5_open(x5_capture** out,int,double,double,double) {captureClosed=false;*out=new x5_capture;return 0;}
 int x5_raw_identity(x5_capture*,int* a,int* m,int* i,int* bus) {*a=0x3c;*m=2;*i=240;*bus=6;return 0;}
 int x5_get(x5_capture* c,int aps,x5_image* im) {

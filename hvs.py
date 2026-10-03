@@ -129,6 +129,7 @@ def main(argv=None):
     r.add_argument('--x5-vin-bypass', action='store_true',
                    help='Native independent dual VIN; requires build --with-vin-record')
     r.add_argument('--legacy-sdk-bypass', action='store_true', help='Old patched SDK/tmpfs baseline only')
+    r.add_argument('--save-format', choices=['full','fast'], default='full', help='full: existing four files; fast: lossless raw archive, directly playable and exportable')
     r.add_argument('--diagnostic', choices=['record', 'receive', 'copy'], default='record')
     r.add_argument('--warmup', type=number, default=1)
     exposure = r.add_mutually_exclusive_group()
@@ -149,6 +150,11 @@ def main(argv=None):
     r.add_argument('--storage', choices=['memory', 'disk'], default='memory')
     r.add_argument('--ram-dir', type=Path, default=Path('/dev/shm'))
     r.add_argument('--max-mib', type=number, default=1024)
+    export = sub.add_parser('export-recording', help='Export a finalized lossless VIN archive to the four compatible files')
+    export.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
+    export.add_argument('--input', type=Path, required=True)
+    export.add_argument('--output', type=Path, required=True)
+    export.add_argument('--max-mib', type=number, default=1024)
     s = sub.add_parser('stop', help='Request graceful stop from another terminal')
     s.add_argument('--output', type=Path, required=True)
     s.add_argument('--wait', type=number, default=30)
@@ -183,6 +189,10 @@ def main(argv=None):
         for key in ('fps','format','gain','ae','hardware_wb'):
             if getattr(args, 'aps_'+key) is not None:
                 raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
+        if args.x5_vin_bypass and (args.aps_exposure_us is not None or args.aps_exposure_lines is not None):
+            parser.error('HVS exposure control is not verified; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md')
+        if args.save_format == 'fast' and not args.x5_vin_bypass:
+            parser.error('--save-format fast requires --x5-vin-bypass')
         manual = any(x is not None for x in (args.aps_exposure_us, args.aps_exposure_lines, args.aps_gain_db))
         if args.x5_vin_bypass and args.legacy_sdk_bypass:
             parser.error('Choose native VIN or the legacy SDK baseline')
@@ -258,6 +268,10 @@ def main(argv=None):
         run(['cmake', '--build', build, '--config', 'Release', '--parallel', args.jobs, '--target', *targets])
         print('Built. Deploy the toolkit directory with lib/x5 and this build directory to X5.')
         return 0
+    if args.command == 'export-recording':
+        binary = executable(build, 'hv_hvs_record_vin', 'hvs_record')
+        run([binary, '--export-session', args.input.resolve(), '--output', args.output.resolve(), '--max-mib', str(args.max_mib)], env=runtime_env())
+        return 0
     if args.command == 'live':
         cache = build / 'CMakeCache.txt'
         if not args.x5_vin_bypass and (not cache.is_file() or 'HV_X5_NATIVE:BOOL=ON' not in cache.read_text()):
@@ -318,6 +332,7 @@ def main(argv=None):
         if args.storage == 'memory':
             command += ['--ram-dir', str(args.ram_dir)]
         if args.x5_vin_bypass:
+            command += ['--save-format', args.save_format]
             command += ['--diagnostic', args.diagnostic, '--warmup', str(args.warmup)]
             for key in ('aps_exposure_us', 'aps_exposure_lines', 'aps_line_time_us', 'aps_gain_db', 'i2c_bus', 'i2c_address'):
                 value = getattr(args, key)
@@ -336,14 +351,16 @@ def main(argv=None):
         summary = read_summary(folder)
         if not summary or summary.get('status') != 'complete':
             raise RuntimeError('Recording incomplete or not finalized; inspect summary.txt and capture logs')
-        for name in ('events.raw', 'aps.avi'):
+        archive = summary.get('session_format') == 'vin_zstd_v1'
+        evs_name, aps_name = ('evs.vin.zst', 'aps.vin.zst') if archive else ('events.raw', 'aps.avi')
+        for name in (evs_name, aps_name):
             if not (folder / name).is_file() or not (folder / name).stat().st_size:
                 raise RuntimeError(f'Missing or empty {name}')
         if not args.dump_timestamps and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
             raise RuntimeError('No graphical display. Use the X5 desktop/X forwarding, or --dump-timestamps.')
         if args.aps_bayer == 'auto':
             aps_count = int(summary.get('aps_frames', '0'))
-            preserved_gray = aps_count > 0 and int(summary.get('gray8_frames', '0')) == aps_count
+            preserved_gray = aps_count > 0 and (archive or int(summary.get('gray8_frames', '0')) == aps_count)
             # Restore this project's existing gbrg replay preset only when all
             # APS Y planes were preserved Gray8. This is not CFA detection.
             args.aps_bayer = 'gbrg' if preserved_gray else 'none'
@@ -351,13 +368,13 @@ def main(argv=None):
                                          if preserved_gray else 'NV12/unknown provenance -> native display'), flush=True)
         if args.aps_bayer != 'none':
             aps_count = int(summary.get('aps_frames', '0'))
-            if aps_count <= 0 or int(summary.get('gray8_frames', '0')) != aps_count:
+            if aps_count <= 0 or (not archive and int(summary.get('gray8_frames', '0')) != aps_count):
                 raise RuntimeError('Bayer replay requires preserved Gray8 APS frames; this session contains NV12 or mixed frames. '
                                    'Replay with --aps-bayer none (scripts/play.sh no longer forces gbrg).')
-            print('Bayer reconstruction uses original Y samples; CFA pattern and color calibration must be verified.', flush=True)
+            print('Bayer preview uses preserved samples (RAW10 archive is reduced to 8 bits for display); CFA/color calibration must be verified.', flush=True)
         print_exposure_summary(summary)
         player = executable(build, 'hv_sample_player', 'player')
-        command = [player, folder / 'events.raw', folder / 'aps.avi', '30', str(args.speed)]
+        command = [player, folder / evs_name, folder / aps_name, '30', str(args.speed)]
         command.extend(['--aps-preview-scale', str(args.aps_preview_scale)])
         if args.precache_aps:
             command.append('--precache-aps')

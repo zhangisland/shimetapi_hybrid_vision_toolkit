@@ -44,15 +44,15 @@ int main() {
  rejects([]{apx::gainIndex(std::numeric_limits<double>::quiet_NaN());});
  assert(apx::exposureLines(1000,10)==100);
  rejects([]{apx::exposureLines(1000,0);});rejects([]{apx::exposureLines(20000,10);});
- IO io;auto regs=apx::apply(io,500,6);
- assert(io.regs[0x015a]==0xa1&&io.regs[0x015b]==0xf4);
+ IO io;rejects([&]{apx::apply(io,500,6);});assert(io.writes.empty());
+ auto regs=apx::apply(io,0,6);
  assert(io.regs[0x3602]==0x80&&io.regs[0x3603]==7&&io.regs[0x3660]==1&&io.regs[0x3661]==1&&io.regs[0x3662]==0);
  assert(io.writes[io.writes.size()-3]==std::make_pair(uint16_t(0x342c),uint8_t(0)));
  assert(io.writes[io.writes.size()-2]==std::make_pair(uint16_t(0x342c),uint8_t(1)));
  assert(io.writes.back()==std::make_pair(uint16_t(0x342c),uint8_t(0)));
  for(auto r:io.writes) assert(r.first!=0x0157&&r.first!=0x0158);
- apx::verify(io,regs);io.regs[0x015b]=0;rejects([&]{apx::verify(io,regs);});
- IO bad;bad.fail=1;rejects([&]{apx::apply(bad,100,0);});
+ apx::verify(io,regs);io.regs[0x3602]=0;rejects([&]{apx::verify(io,regs);});
+ IO bad;bad.fail=1;rejects([&]{apx::apply(bad,0,0);});
  assert(bad.writes.size()==1); // abort on first failure, never pretend success
  return 0;
 }

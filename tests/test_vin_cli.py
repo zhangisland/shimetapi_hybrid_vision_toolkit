@@ -14,12 +14,12 @@ class VinCli(unittest.TestCase):
              mock.patch.object(hvs.os, 'execve', side_effect=SystemExit) as execute:
             with self.assertRaises(SystemExit):
                 hvs.main(['record', '--x5-vin-bypass', '--output', str(Path(tmp)/'new'),
-                          '--aps-exposure-lines', '100', '--aps-gain-db', '0', '--i2c-bus', '6',
+                          '--aps-gain-db', '0', '--i2c-bus', '6',
                           '--max-mib', '64', '--diagnostic', 'copy'])
             self.assertEqual(binary.call_args.args[1], 'hv_hvs_record_vin')
             env.assert_called_once_with(vin_bypass=False)
             cmd = execute.call_args.args[1]
-            for key, value in [('aps-exposure-lines', '100'), ('aps-gain-db', '0.0'), ('i2c-bus', '6'), ('diagnostic', 'copy')]:
+            for key, value in [('aps-gain-db', '0.0'), ('i2c-bus', '6'), ('diagnostic', 'copy')]:
                 self.assertEqual(cmd[cmd.index('--'+key)+1], value)
 
     def test_bad_controls(self):

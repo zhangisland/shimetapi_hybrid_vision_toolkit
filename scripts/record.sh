@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-#!/bin/bash
 X5_VIN_BYPASS=1
 STORAGE="memory"
 SECONDS_ARG=5
@@ -10,6 +9,7 @@ I2C_BUS=6
 I2C_ADDRESS="0x3c"
 APS_GAIN_DB=0
 OUTPUT="/app/recordings/gain0_new"
+SAVE_FORMAT="fast"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +34,9 @@ while [[ $# -gt 0 ]]; do
         --aps-gain-db)
             APS_GAIN_DB="$2"; shift 2
             ;;
+        --save-format)
+            SAVE_FORMAT="$2"; shift 2
+            ;;
         --output)
             OUTPUT="$2"; shift 2
             ;;
@@ -46,18 +49,19 @@ while [[ $# -gt 0 ]]; do
             echo "  --i2c-bus N             I2C bus number (default: 6)"
             echo "  --i2c-address ADDR      I2C address (default: 0x3c)"
             echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
+            echo "  --save-format SAVE_FORMAT        if save to disk faster (default: fast)"
             echo "  --output PATH           where to save recording files (default: /app/recordings/gain0_new)"
             exit 0
             ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--output PATH]" >&2
+            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--save-format SAVE_FORMAT] [--output PATH]" >&2
             exit 1
             ;;
     esac
 done
 
-ARGS=(--storage "$STORAGE" --seconds "$SECONDS_ARG" --max-mib "$MAX_MIB" --i2c-bus "$I2C_BUS" --i2c-address "$I2C_ADDRESS" --aps-gain-db "$APS_GAIN_DB" --output "$OUTPUT")
+ARGS=(--storage "$STORAGE" --seconds "$SECONDS_ARG" --max-mib "$MAX_MIB" --i2c-bus "$I2C_BUS" --i2c-address "$I2C_ADDRESS" --aps-gain-db "$APS_GAIN_DB" --save-format "$SAVE_FORMAT" --output "$OUTPUT")
 if [[ "$X5_VIN_BYPASS" == "1" ]]; then ARGS+=(--x5-vin-bypass); fi
 
 python3 hvs.py record "${ARGS[@]}"

@@ -128,3 +128,13 @@ set_tests_properties(native_cli_profile_after_exposure native_cli_profile_before
     PROPERTIES ENVIRONMENT "HVS_FAKE_EXPECT_CONTROLS=3,50,2,10" TIMEOUT 10)
 add_test(NAME native_control_failure COMMAND native_live_fake --no-display --seconds 0.1)
 set_tests_properties(native_control_failure PROPERTIES ENVIRONMENT "HVS_FAKE_OPEN_ERROR=1" WILL_FAIL TRUE TIMEOUT 10)
+
+include("${CMAKE_CURRENT_LIST_DIR}/../samples/cpp/common/Zstd.cmake")
+hvs_enable_zstd(vin_record_fake)
+hvs_enable_zstd(player_responsive)
+hvs_enable_zstd(aps_player_compile)
+hvs_enable_zstd(player_main_compile)
+
+if(HVS_ZSTD_LIBRARY AND Python3_Interpreter_FOUND)
+ set_property(TEST vin_record_lifecycle APPEND PROPERTY ENVIRONMENT HVS_ARCHIVE_TESTS=1)
+endif()
