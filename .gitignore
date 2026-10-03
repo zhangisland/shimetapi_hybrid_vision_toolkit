@@ -8,6 +8,7 @@ tools/apx003cc_diagnostics/*
 !tools/apx003cc_diagnostics/probe_exposure_confirm_v3.py
 !tools/apx003cc_diagnostics/probe_exposure_sweep_v4.py
 !tools/apx003cc_diagnostics/parse_i2c_trace.py
+!tools/apx003cc_diagnostics/probe_exposure_3a05.py
 .work*
 *.log
 *.png

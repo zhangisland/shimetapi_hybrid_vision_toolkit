@@ -111,6 +111,7 @@ static void trace_log(const char *fmt, ...) {
     va_start(ap, fmt);
     vdprintf(g_fd, fmt, ap);
     va_end(ap);
+    dprintf(g_fd, "\n");
     pthread_mutex_unlock(&g_mutex);
     g_in_log = 0;
 }

@@ -74,22 +74,22 @@ def main():
     by_reg = {}   # reg -> ordered list of values (single-byte writes, burst-expanded)
     burst = []    # (reg, [bytes]) for multi-byte writes
     with open(args.log, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            m = WRITE_RE.search(line)
-            if m:
-                reg = int(m.group(2), 16)
-                data = parse_bytes(m.group(3))
-                if len(data) == 1:
-                    by_reg.setdefault(reg, []).append(data[0])
-                elif len(data) > 1:
-                    burst.append((reg, data))
-                    for i, b in enumerate(data):
-                        by_reg.setdefault(reg + i, []).append(b)
-                continue
-            a = ADDR_RE.search(line)
-            if a:
-                # bare 2-byte address write (read preamble); record for coverage
-                by_reg.setdefault(int(a.group(2), 16), [])
+        content = f.read()
+    # The interposer may emit entries without trailing newlines (all on one line);
+    # scan the whole content with finditer so every write is counted, not just the
+    # first match per line.
+    for m in WRITE_RE.finditer(content):
+        reg = int(m.group(2), 16)
+        data = parse_bytes(m.group(3))
+        if len(data) == 1:
+            by_reg.setdefault(reg, []).append(data[0])
+        elif len(data) > 1:
+            burst.append((reg, data))
+            for i, b in enumerate(data):
+                by_reg.setdefault(reg + i, []).append(b)
+    for a in ADDR_RE.finditer(content):
+        # bare 2-byte address write (read preamble); record for coverage
+        by_reg.setdefault(int(a.group(2), 16), [])
 
     if not by_reg and not burst:
         print("NO I2C_WR lines. The vendor stack did not issue i2c-dev writes")
