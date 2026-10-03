@@ -14,12 +14,25 @@
  * Build (RDK X5 board, aarch64 gcc):
  *   gcc -shared -fPIC -O2 -o passive_i2c_trace.so passive_i2c_trace.c -ldl -lpthread
  *
- * Run:
+ * Run (passive trace):
  *   export I2C_TRACE_LOG=/tmp/i2c_trace.log
  *   LD_PRELOAD=$PWD/tools/apx003cc_diagnostics/passive_i2c_trace.so \
  *     python3 hvs.py live --x5-vin-bypass -- --preview-width 960 --no-verify \
  *     2>&1 | tee /tmp/preview_terminal.log
  *   # ~15s, then Ctrl+C
+ *
+ * Run (init-time register override — decisive test for init-latched integration
+ * time): rewrite the value the vendor writes during init BEFORE it reaches the
+ * sensor. e.g. halve the 0x3A05/06 candidate (1500 -> 750 = 0x02EE):
+ *   export APX_OVERRIDE="0x3A05=0x02,0x3A06=0xEE"
+ *   export I2C_TRACE_LOG=/tmp/i2c_trace.log
+ *   LD_PRELOAD=$PWD/tools/apx003cc_diagnostics/passive_i2c_trace.so \
+ *     python3 hvs.py live --x5-vin-bypass -- --preview-width 960 --no-verify \
+ *     2>&1 | tee /tmp/preview_terminal.log
+ * Each overridden write is logged as "OVERRIDE fd= reg=0xXXXX 0xAA->0xBB" and the
+ * substituted value is what actually goes out on the wire (visible in the I2C_WR
+ * lines that follow). Overrides are in-memory only: nothing persists, the sensor
+ * returns to vendor defaults on the next clean init.
  *
  * Output lines (parsed by parse_i2c_trace.py):
  *   OPEN <path> fd=<n>
@@ -80,10 +93,47 @@ static int g_fd = -1;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int g_in_log = 0;
 
+/* --- register override: rewrite vendor init writes before they reach the sensor --- */
+#define MAX_OVERRIDE 64
+static uint16_t g_ov_reg[MAX_OVERRIDE];
+static uint8_t  g_ov_val[MAX_OVERRIDE];
+static int      g_ov_n = 0;
+
+static int override_lookup(uint16_t reg, uint8_t *out) {
+    for (int i = 0; i < g_ov_n; i++)
+        if (g_ov_reg[i] == reg) { *out = g_ov_val[i]; return 1; }
+    return 0;
+}
+
+static void parse_overrides(void) {
+    const char *s = getenv("APX_OVERRIDE");
+    if (!s || !s[0]) return;
+    char buf[4096];
+    strncpy(buf, s, sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",", &save); tok && g_ov_n < MAX_OVERRIDE;
+         tok = strtok_r(NULL, ",", &save)) {
+        unsigned long r = 0, v = 0;
+        if (sscanf(tok, "0x%lx=0x%lx", &r, &v) == 2 && r <= 0xffff && v <= 0xff) {
+            g_ov_reg[g_ov_n] = (uint16_t)r;
+            g_ov_val[g_ov_n] = (uint8_t)v;
+            g_ov_n++;
+        }
+    }
+}
+
 __attribute__((constructor)) static void trace_banner(void) {
     const char *p = getenv("I2C_TRACE_LOG");
+    parse_overrides();
     fprintf(stderr, "APX_TRACE_LOADED pid=%d log=%s\n",
             (int)getpid(), (p && p[0]) ? p : "(unset -> stderr)");
+    if (g_ov_n) {
+        fprintf(stderr, "APX_OVERRIDE[%d]:", g_ov_n);
+        for (int i = 0; i < g_ov_n; i++)
+            fprintf(stderr, " 0x%04x=0x%02x", g_ov_reg[i], g_ov_val[i]);
+        fprintf(stderr, "\n");
+    }
 }
 
 static void open_log(void) {
@@ -185,6 +235,24 @@ int ioctl(int fd, unsigned long request, ...) {
     void *arg = va_arg(ap, void *);
     va_end(ap);
     if (!real_ioctl) real_ioctl = dlsym(RTLD_NEXT, "ioctl");
+
+    /* rewrite matched init writes BEFORE they reach the sensor */
+    if (g_ov_n && is_i2c(fd) && request == I2C_RDWR && arg) {
+        struct i2c_rdwr_ioctl_data *rd = (struct i2c_rdwr_ioctl_data *)arg;
+        for (uint32_t i = 0; i < rd->nmsgs; i++) {
+            struct i2c_msg *m = &rd->msgs[i];
+            if ((m->flags & I2C_M_RD) == 0 && m->len >= 3) {
+                uint16_t reg = (uint16_t)((m->buf[0] << 8) | m->buf[1]);
+                uint8_t ov;
+                if (override_lookup(reg, &ov) && m->buf[2] != ov) {
+                    trace_log("OVERRIDE fd=%d reg=0x%04x 0x%02x->0x%02x",
+                              fd, reg, m->buf[2], ov);
+                    m->buf[2] = ov;
+                }
+            }
+        }
+    }
+
     int ret = real_ioctl(fd, request, arg);
 
     if (is_i2c(fd)) {
