@@ -168,12 +168,8 @@ def main():
         ("E", 1040, "final restore"),
     ]
 
-    i2c = I2C(args.i2c_bus, args.i2c_address)
-    stream_before = i2c.read8(REG_STREAM_ON)
-    print(f"== probe_exposure_stopstream ==\n"
-          f"0x340C readback before test: 0x{stream_before:02X} (expect 0x01 = streaming)\n"
-          f"WATCH the preview window at every step: clean image = PASS, torn/garbage = FAIL\n",
-          flush=True)
+    i2c = I2C(args.i2c_bus, args.i2c_address)   # open only; first transaction waits for the sensor
+    steps_note = None
 
     preview = Preview(args.preview_width)
     results = []
@@ -184,7 +180,15 @@ def main():
         if base is None:
             raise RuntimeError("baseline failed: preview produced no fresh frames")
         bmean, bfps = base
-        print(f"baseline @factory 1040: raw_mean={bmean:.2f} fps~{bfps:.1f}\n", flush=True)
+        # Sensor is now powered and initialized by the vendor stack (first frames
+        # streamed) - only NOW is the I2C address responsive. Reading 0x340C
+        # before preview start caused Errno 121 (EIO, NACK on unpowered sensor).
+        stream_before = i2c.read8(REG_STREAM_ON)
+        print(f"== probe_exposure_stopstream ==\n"
+              f"0x340C readback: 0x{stream_before:02X} (expect 0x01 = streaming)\n"
+              f"baseline @factory 1040: raw_mean={bmean:.2f} fps~{bfps:.1f}\n"
+              f"WATCH the preview window at every step: clean image = PASS, torn/garbage = FAIL\n",
+              flush=True)
 
         for tag, lines, note in steps:
             got = set_exposure(i2c, lines)
