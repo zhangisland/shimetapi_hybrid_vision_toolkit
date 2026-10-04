@@ -189,8 +189,8 @@ def main(argv=None):
         for key in ('fps','format','gain','ae','hardware_wb'):
             if getattr(args, 'aps_'+key) is not None:
                 raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
-        if args.x5_vin_bypass and (args.aps_exposure_us is not None or args.aps_exposure_lines is not None):
-            parser.error('HVS exposure control is not verified; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md')
+        if args.x5_vin_bypass and args.aps_exposure_us is not None:
+            parser.error('--aps-exposure-us is not wired (line time unverified); use --aps-exposure-lines (0x3503/04, factory 1040)')
         if args.save_format == 'fast' and not args.x5_vin_bypass:
             parser.error('--save-format fast requires --x5-vin-bypass')
         manual = any(x is not None for x in (args.aps_exposure_us, args.aps_exposure_lines, args.aps_gain_db))

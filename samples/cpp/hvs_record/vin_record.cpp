@@ -45,7 +45,7 @@ static Options parse(int argc,char** argv) {
    std::string k=argv[i];
    if(k=="--preview") {o.preview=true;continue;}
    if(k=="--no-verify") {o.verifyRegs=false;continue;}
-   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
+   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-exposure-lines 1040] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
    std::string v=argv[++i];
    if(k=="--aps-bayer") {if(v!="none"&&v!="gbrg"&&v!="rggb"&&v!="bggr"&&v!="grbg")throw std::runtime_error("Invalid preview Bayer pattern");o.previewBayer=v;continue;}
@@ -80,7 +80,7 @@ static Options parse(int argc,char** argv) {
  }
  if((o.output.empty()&&!o.preview)||o.timeout<=0||o.stall<=0) throw std::runtime_error("output and positive timeouts required");
  if(o.lines&&o.us) throw std::runtime_error("exposure lines and microseconds are mutually exclusive");
- if(o.us||o.lines) throw std::runtime_error("APS exposure control is not verified for HVS mode; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md");
+ if(o.us) throw std::runtime_error("--aps-exposure-us requires a verified --aps-line-time-us; use --aps-exposure-lines (0x3503/04, factory 1040)");
  if((o.lines||o.gain>=0)&&o.bus<0) throw std::runtime_error("Manual control requires explicit --i2c-bus from board configuration (no scanning)");
  if(o.diagnostic!="record"&&o.diagnostic!="receive"&&o.diagnostic!="copy") throw std::runtime_error("Unknown diagnostic mode");
  return o;
@@ -346,7 +346,7 @@ static int run(const Options& o) {
    uint8_t initializedId[2]{};sensor->readBytes(0x3428,initializedId,2);
    const auto chipId=(uint16_t(initializedId[0])<<8)|initializedId[1];postInitStatus=chipId;
    std::cout<<"APX003CC post-init 0x3428 snapshot (identity verified BEFORE init): 0x"<<std::hex<<chipId<<std::dec<<std::endl;
-   // 0x01xx is excluded in the current HVS mode; do not re-probe VTS there.
+   // Exposure = 0x3503/04 (u16 BE, factory 1040 lines); gain = verified 0x3602 chain.
    regs=apx::apply(*sensor,o.lines,o.gain);
    std::cout<<"APS control after both streams started: lines="<<o.lines<<" gain_dB="<<(o.gain>=0?apx::gainIndex(o.gain)*0.375:-1)<<" VTS="<<vts<<" registers verified; NOT per-frame exposure\n";
  }

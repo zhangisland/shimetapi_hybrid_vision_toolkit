@@ -44,14 +44,20 @@ int main() {
  rejects([]{apx::gainIndex(std::numeric_limits<double>::quiet_NaN());});
  assert(apx::exposureLines(1000,10)==100);
  rejects([]{apx::exposureLines(1000,0);});rejects([]{apx::exposureLines(20000,10);});
- IO io;rejects([&]{apx::apply(io,500,6);});assert(io.writes.empty());
- auto regs=apx::apply(io,0,6);
+ IO io;
+ auto eregs=apx::apply(io,500,6); // 500 lines (0x3503/04) + 6 dB gain
+ assert(io.regs[0x3503]==0x01&&io.regs[0x3504]==0xF4); // 500 = 0x01F4 big-endian
  assert(io.regs[0x3602]==0x80&&io.regs[0x3603]==7&&io.regs[0x3660]==1&&io.regs[0x3661]==1&&io.regs[0x3662]==0);
  assert(io.writes[io.writes.size()-3]==std::make_pair(uint16_t(0x342c),uint8_t(0)));
  assert(io.writes[io.writes.size()-2]==std::make_pair(uint16_t(0x342c),uint8_t(1)));
  assert(io.writes.back()==std::make_pair(uint16_t(0x342c),uint8_t(0)));
  for(auto r:io.writes) assert(r.first!=0x0157&&r.first!=0x0158);
- apx::verify(io,regs);io.regs[0x3602]=0;rejects([&]{apx::verify(io,regs);});
+ apx::verify(io,eregs);io.regs[0x3602]=0;rejects([&]{apx::verify(io,eregs);});
+ // Exposure-only write (gain unspecified): plain 0x3503/04, no 0x342c gain latch.
+ IO eio;auto eregs2=apx::apply(eio,920,-1);
+ assert(eio.regs[0x3503]==0x03&&eio.regs[0x3504]==0x98); // 920 = 0x0398
+ for(auto r:eio.writes) assert(r.first!=0x342c);
+ apx::verify(eio,eregs2);
  IO bad;bad.fail=1;rejects([&]{apx::apply(bad,0,0);});
  assert(bad.writes.size()==1); // abort on first failure, never pretend success
  return 0;
