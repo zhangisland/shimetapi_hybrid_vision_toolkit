@@ -29,6 +29,13 @@ ADDR_RE = re.compile(
     r"I2C_ADDR fd=\d+ addr=0x([0-9a-fA-F]+) reg=0x([0-9a-fA-F]+)"
 )
 
+# Timestamped write: the interposer prefixes every line with [sec.usec], so the
+# dense init burst can be separated from later AE/runtime writes by time.
+TS_WRITE_RE = re.compile(
+    r"\[(\d+)\.(\d{6})\] I2C_WR fd=\d+ addr=0x[0-9a-fA-F]+ "
+    r"reg=0x([0-9a-fA-F]+) data=([0-9a-fA-F ]*)"
+)
+
 # Registers whose role is already established.
 KNOWN = {
     0x340C: "stream ctrl (0=stop,1=run)",
@@ -69,12 +76,18 @@ def main():
     ap.add_argument("log", help="trace log path")
     ap.add_argument("--sensor-so", default=None)
     ap.add_argument("--top", type=int, default=60)
+    ap.add_argument("--runtime", action="store_true",
+                    help="print writes after the init burst (AE/runtime exposure)")
     args = ap.parse_args()
 
     by_reg = {}   # reg -> ordered list of values (single-byte writes, burst-expanded)
     burst = []    # (reg, [bytes]) for multi-byte writes
     with open(args.log, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
+    events = []  # (t, reg, [bytes]) time-ordered, for --runtime
+    for m in TS_WRITE_RE.finditer(content):
+        t = int(m.group(1)) + int(m.group(2)) / 1e6
+        events.append((t, int(m.group(3), 16), parse_bytes(m.group(4))))
     # The interposer may emit entries without trailing newlines (all on one line);
     # scan the whole content with finditer so every write is counted, not just the
     # first match per line.
@@ -99,6 +112,39 @@ def main():
 
     print(f"== parsed {sum(len(v) for v in by_reg.values())} register writes, "
           f"{len(by_reg)} distinct registers, {len(burst)} burst writes ==")
+
+    if args.runtime and events:
+        events.sort(key=lambda e: e[0])
+        # The init burst is one dense cluster; the largest inter-write gap
+        # separates it from any later AE/runtime traffic.
+        best_gap, split = 0.0, 0
+        for i in range(1, len(events)):
+            g = events[i][0] - events[i - 1][0]
+            if g > best_gap:
+                best_gap, split = g, i
+        init_end = events[split - 1][0] if split else events[-1][0]
+        init_val = {}
+        for t, reg, data in events[:split]:
+            if len(data) == 1:
+                init_val[reg] = data[0]
+        print(f"\n== runtime writes (init burst ends t={init_end:.3f}s, "
+              f"max gap {best_gap:.3f}s) ==")
+        rt = events[split:]
+        if not rt:
+            print("  NONE — no register writes after the init burst.")
+            print("  (AE did not move: run longer, or do the cover/uncover maneuver)")
+        else:
+            for t, reg, data in rt:
+                if len(data) == 1:
+                    v = data[0]
+                    prev = init_val.get(reg)
+                    note = "" if prev is None or prev == v else \
+                        f"   (changed from 0x{prev:02X})"
+                    print(f"  t={t:8.3f}s  0x{reg:04X} = 0x{v:02X}{note}")
+                    init_val[reg] = v
+                else:
+                    print(f"  t={t:8.3f}s  0x{reg:04X} +{len(data)} bytes "
+                          + " ".join(f"{b:02X}" for b in data[:8]))
 
     if burst:
         print(f"\n== burst/block writes ({len(burst)}) ==")
