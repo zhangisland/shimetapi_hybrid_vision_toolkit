@@ -38,4 +38,4 @@ if [[ -z "$INPUT_DIR" ]]; then
 fi
 
 
-python3 hvs.py export-recording --max-mib "$MAX_MIB" --input "$INPUT_DIR" --output "$"$OUTPUT_DIR"" 
+python3 hvs.py export-recording --max-mib "$MAX_MIB" --input "$INPUT_DIR" --output "$OUTPUT_DIR" 
