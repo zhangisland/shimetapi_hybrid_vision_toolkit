@@ -40,39 +40,25 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SO_PATH = os.path.join(ROOT, "tools", "apx003cc_diagnostics", "passive_i2c_trace.so")
 TRACE_LOG = "/tmp/sweep_trace.log"
 
-# (label, kind, hi_reg, lo_reg_or_value) — 16-bit big-endian (lower addr = high byte)
-# for 16-bit candidates; kind="byte" for single-byte controls (lo field is the byte).
+# (label, kind, hi_reg, ov_value): kind="byte" -> single-byte override of hi_reg;
+# kind="u16" -> 16-bit big-endian override (hi_reg = high byte, hi_reg+1 = low).
+# ov_value is the value to WRITE (reduced from the vendor init value).
 CANDIDATES = [
-    # --- controls ---
-    ("0x3253  [POSITIVE: fps divider, expect DARKER]", "byte", 0x3253, 0x30),
-    ("0x3A05/06 [NEGATIVE: ruled out, expect flat]", "u16", 0x3A05, 0x3A06),
-    # --- 0x3Axx block, lines-like values ---
-    ("0x3A0E/0F", "u16", 0x3A0E, 0x3A0F),
-    ("0x3A12/13", "u16", 0x3A12, 0x3A13),
-    ("0x3A26/27", "u16", 0x3A26, 0x3A27),
-    ("0x3A07/08", "u16", 0x3A07, 0x3A08),
-    # --- 0x35xx block, lines-like values ---
-    ("0x3503/04", "u16", 0x3503, 0x3504),
-    ("0x3505/06", "u16", 0x3505, 0x3506),
-    ("0x3512/13", "u16", 0x3512, 0x3513),
-    ("0x3514/15", "u16", 0x3514, 0x3515),
-    ("0x3522/23", "u16", 0x3522, 0x3523),
+    # POSITIVE brightness control: gain reg 0x3602 vendor init 0x78 (=0dB).
+    # 0x10 = 24dB code (verified anchor in v2: raw_mean 77 -> ~564). Preview is
+    # started without --aps-gain-db so the C++ side never touches I2C and the
+    # init override is NOT overwritten at runtime. If this does not brighten,
+    # the sensor response side is broken and every flat below is void.
+    ("0x3602  [POSITIVE: gain 0dB->24dB, expect BIG brighten]", "byte", 0x3602, 0x10),
+    # NEGATIVE control (already ruled out, must stay flat).
+    ("0x3A05/06 [NEGATIVE: ruled out, expect flat]", "u16", 0x3A05, 0x02EE),  # 1500->750
+    # --- died at 50% override: gentle retest ---
+    ("0x3503/04 gentle 1040->920 (-12%)", "u16", 0x3503, 0x0398),
+    ("0x3514/15 gentle 2598->2400 (-7.6%) [VTS? 2598*12.8us=30fps]", "u16", 0x3514, 0x0960),
+    # --- Sony coarse-integration style block, NEVER init-tested before ---
+    ("0x3500/01 coarse 0x0100(256)->0x0080(128)", "u16", 0x3500, 0x0080),
+    ("0x3502 fine 0x03->0x01", "byte", 0x3502, 0x01),
 ]
-
-# vendor init values (ground truth from the i2c-dev trace), keyed by hi_reg.
-ORIG16 = {
-    0x3A05: 0x05DC,  # 1500 (negative control)
-    0x3A0E: 0x0960,  # 2400
-    0x3A12: 0x0064,  # 100
-    0x3A26: 0x00C8,  # 200
-    0x3A07: 0x0050,  # 80
-    0x3503: 0x0410,  # 1040
-    0x3505: 0x0400,  # 1024
-    0x3512: 0x0715,  # 1813
-    0x3514: 0x0A26,  # 2598
-    0x3522: 0x0100,  # 256
-}
-BYTE_ORIG = {0x3253: 0x28}   # 40 -> 30 fps
 
 
 class Preview:
@@ -112,6 +98,9 @@ class Preview:
         return self.proc is not None and self.proc.poll() is None
 
     def measure(self, settle, window):
+        """Wait for the first fresh frame, then average `window` seconds of
+        raw_mean. Also derives fps from the sample timestamps. Returns
+        (mean, fps) or None if the preview died / produced no fresh frames."""
         self.samples.clear()
         self.last_seq = -1
         # Phase 1: wait for the FIRST fresh frame. Sensor init (search + dual VIN
@@ -132,8 +121,12 @@ class Preview:
             if not self.alive():
                 return None
             time.sleep(0.1)
-        recent = [v for t, v in self.samples if t >= deadline - window]
-        return sum(recent) / len(recent) if recent else None
+        pts = [(t, v) for t, v in self.samples if t >= deadline - window]
+        if not pts:
+            return None
+        mean = sum(v for _, v in pts) / len(pts)
+        fps = (len(pts) - 1) / (pts[-1][0] - pts[0][0]) if len(pts) >= 2 else 0.0
+        return mean, fps
 
     def stop(self):
         if self.alive():
@@ -179,42 +172,49 @@ def main():
         print(f"== probe_exposure_init_sweep ==\n"
               f"so={SO_PATH} trace={TRACE_LOG}", flush=True)
         base = run("baseline (no override)", None)
-        print(f"baseline raw_mean = {base:.2f}\n", flush=True)
+        if base is None:
+            raise RuntimeError("baseline measurement failed: preview produced "
+                               "no fresh frames (check [preview] output above)")
+        bmean, bfps = base
+        print(f"baseline raw_mean = {bmean:.2f}  fps~{bfps:.1f}\n", flush=True)
 
-        for i, (label, kind, hi, lo) in enumerate(CANDIDATES):
+        for i, (label, kind, hi, val) in enumerate(CANDIDATES):
             if i < args.skip:
                 continue
             if kind == "byte":
-                ov = "0x%04X=0x%02X" % (hi, lo)
-                orig = BYTE_ORIG.get(hi, 0)
+                ov = "0x%04X=0x%02X" % (hi, val)
             else:
-                orig = ORIG16.get(hi)
-                if orig is None:
-                    print(f"[skip] {label}: no vendor value recorded", flush=True)
-                    continue
-                ov = override_str(hi, orig // 2)
-            mean = run(label, ov)
-            if mean is None:
+                ov = override_str(hi, val)
+            res = run(label, ov)
+            if res is None:
                 print(f"{label}: PREVIEW DIED (override {ov})", flush=True)
-                results.append((label, None, ov))
+                results.append((label, None, None, ov))
                 continue
-            ratio = mean / base * 100.0 if base else 0.0
-            delta = mean - base
+            mean, fps = res
+            ratio = mean / bmean * 100.0
+            delta = mean - bmean
             print(f"{label}: override {ov} -> raw_mean={mean:.2f} "
-                  f"(delta={delta:+.2f}, {ratio:.1f}%)", flush=True)
-            results.append((label, mean, ov))
+                  f"(delta={delta:+.2f}, {ratio:.1f}%) fps~{fps:.1f}", flush=True)
+            results.append((label, mean, fps, ov))
 
         print("\n== summary ==", flush=True)
-        for label, mean, ov in results:
+        for label, mean, fps, ov in results:
             if mean is None:
                 print(f"  DIED      {label}", flush=True)
             else:
-                delta = mean - base
-                print(f"  {'MOVED' if abs(delta) > base * 0.08 else 'flat  '}  "
-                      f"delta={delta:+7.2f}  {label}", flush=True)
-        print("\nRule: a candidate with |delta| > ~8% of baseline is the integration "
-              "time (halving it darkens). Positive control 0x3253 must show MOVED, "
-              "otherwise the override pipeline is broken and flat results are void.",
+                delta = mean - bmean
+                tag = "MOVED" if abs(delta) > bmean * 0.08 else "flat  "
+                print(f"  {tag}  delta={delta:+7.2f}  fps~{fps:5.1f}  {label}",
+                      flush=True)
+        print("\nRules:\n"
+              "  1. POSITIVE control 0x3602 (gain 0->24dB) MUST show MOVED with a "
+              "big brighten; otherwise the sensor response side is broken and all "
+              "flat results are void.\n"
+              "  2. NEGATIVE control 0x3A05/06 must stay flat.\n"
+              "  3. Any other candidate with |delta| > 8% of baseline is the "
+              "integration time -> wire it into vin_record.cpp before stream-on.\n"
+              "  4. If 0x3514/15 shows fps UP but brightness flat, it is VTS "
+              "(frame length) and exposure lines are fixed elsewhere.",
               flush=True)
     finally:
         preview.stop()
