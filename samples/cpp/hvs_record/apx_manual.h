@@ -30,24 +30,16 @@ inline int exposureLines(double us, double lineUs) {
 using Registers=std::vector<std::pair<uint16_t,uint8_t>>;
 template<class IO> Registers apply(IO& io,int lines,double gain) {
  Registers regs;
- if(lines) {
-   // APS coarse integration time in lines (big-endian u16: 0x3503=hi, 0x3504=lo).
-   // Factory 0x0410=1040. Init-time override 1040->920 darkens raw_mean ~12% linearly
-   // (probe_exposure_init_sweep.py, 2026-10-04). Fewer lines = shorter exposure =
-   // darker, which fixes bright-field overexposure at gain 0. Runtime (post-open)
-   // write retention is unverified on the board: readback below confirms the value
-   // holds, and brightness must still be compared against the factory 1040 frame.
-   regs.insert(regs.end(),{{0x3503,uint8_t((lines>>8)&0xFF)},{0x3504,uint8_t(lines&0xFF)}});
- }
+ if(lines) throw std::runtime_error("APS exposure control unavailable in this HVS mode: 0x01xx is excluded by APX003CC_PRIOR_KNOWLEDGE.md; no sensor register was written");
  if(gain>=0) {
    const int i=gainIndex(gain);
    regs.insert(regs.end(),{{0x3603,7},{0x3660,1},{0x3602,analog[i]}, {0x3661,1},{0x3662,0}});
  }
  for(auto r:regs) io.write(r.first,r.second);
- if(gain>=0) for(auto v:{0,1,0}) io.write(0x342c,uint8_t(v)); // gain latch only
+ if(!regs.empty()) for(auto v:{0,1,0}) io.write(0x342c,uint8_t(v));
  for(auto r:regs) {const auto actual=io.read(r.first);if(actual!=r.second) {
    std::ostringstream msg;msg<<"APS register readback mismatch: reg=0x"<<std::hex<<r.first<<" requested=0x"<<unsigned(r.second)<<" read=0x"<<unsigned(actual);
-   if(r.first==0x3503||r.first==0x3504) msg<<"; integration-time write did not retain after stream-open (may be init-latched)";
+   if(r.first==0x015a||r.first==0x015b) msg<<"; documented exposure registers do not retain writes in this mode; exposure was NOT verified";
    throw std::runtime_error(msg.str());
  }}
  return regs;
