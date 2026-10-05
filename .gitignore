@@ -11,6 +11,7 @@ tools/apx003cc_diagnostics/*
 !tools/apx003cc_diagnostics/probe_exposure_3a05.py
 !tools/apx003cc_diagnostics/probe_exposure_init_sweep.py
 !tools/apx003cc_diagnostics/probe_exposure_stopstream.py
+!tools/apx003cc_diagnostics/patch_hvs_exposure.py
 .work*
 *.log
 *.png
