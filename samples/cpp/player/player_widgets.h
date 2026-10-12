@@ -17,6 +17,7 @@
 #include <iosfwd>
 #include <memory>
 #include <future>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -90,6 +91,9 @@ private:
     std::future<std::vector<uint8_t>> archiveNext_;
     uint64_t archiveNextIndex_=0;
     std::vector<uint8_t> archiveRaw_,archiveGray_;
+    std::ifstream rawFile_;
+    std::vector<hv_archive::Entry> rawEntries_;
+    cv::Mat raw10Display(const hv_archive::Entry& entry);
     double   fps_ = 30.0, fallback_fps_ = 30.0;
     uint64_t total_frames_ = 0, current_index_ = 0;
     cv::Mat  current_frame_;

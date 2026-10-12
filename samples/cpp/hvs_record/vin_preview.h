@@ -50,6 +50,11 @@ static int previewVin(const Options& o) {
  try {aps=std::thread(receive,1);}catch(...){stop=true;evs.join();throw;}
  struct Join {std::atomic<bool>& stop;std::thread& a;std::thread& b;~Join(){stop=true;if(a.joinable())a.join();if(b.joinable())b.join();}} join{stop,evs,aps};
  hv_player::ApsIsp isp;isp.pattern=o.previewBayer;isp.previewScale=o.previewScale;
+ // Display calibration for the measured 0 dB scene; source RAW is untouched.
+ const double black[2][2]={{63.2667,63.2667},{63.2667,63.2667}};
+ constexpr double displayWhite=14.9564; // RAW10 DN above black, display only
+ isp.config.mode="manual";isp.config.gains={2.1144,1.0,1.7008};
+ isp.wb.setMode("manual",isp.config,false);
  Shimeta::codec::MipiRaw8Decoder decoder;
  const auto begin=ns();auto report=begin,verify=begin;uint64_t shown=0,last=0,lastEvs=0,dropped=0,lastSampleHost=begin;
  std::vector<uint8_t> raw(3995136),eventBytes(1048576),gray(1632*1224);
@@ -65,9 +70,24 @@ static int previewVin(const Options& o) {
   if(fresh) {
    if(last&&sequence>last+1)dropped+=sequence-last-1;last=sequence;lastSampleHost=apsHost;
    uint64_t saturated=0,sum=0;
-   for(size_t i=0;i<gray.size();++i){const unsigned v=raw[2*i]|(unsigned(raw[2*i+1])<<8);gray[i]=uint8_t(std::min(v>>2,255u));if(i){sum+=v;saturated+=v>=1020&&v<=1023;}}
+   for(size_t i=0;i<gray.size();++i){const unsigned v=raw[2*i]|(unsigned(raw[2*i+1])<<8);gray[i]=cv::saturate_cast<uint8_t>((double(v)-black[(i/1632)&1][i&1])*255/displayWhite);if(i){sum+=v;saturated+=v>=1020&&v<=1023;}}
+   gray[0]=gray[2]; // exclude first word from the display as well as statistics
    rawMean=double(sum)/(gray.size()-1);rawSaturation=100.*saturated/(gray.size()-1);
+   // Average same-colour RAW10 samples before stretching, instead of CFA decimation.
+   if(o.previewScale>1 && o.previewBayer!="none") {
+    const int s=o.previewScale;
+    for(int y=0;y+2*s<=1224;y+=2*s) for(int x=0;x+2*s<=1632;x+=2*s)
+     for(int dy=0;dy<2;++dy) for(int dx=0;dx<2;++dx) {
+      unsigned total=0;
+      for(int by=0;by<s;++by) for(int bx=0;bx<s;++bx) {
+       size_t j=size_t(y+dy+2*by)*1632+x+dx+2*bx;if(!j)j=2;
+       total+=raw[2*j]|(unsigned(raw[2*j+1])<<8);
+      }
+      gray[(y+dy)*1632+x+dx]=cv::saturate_cast<uint8_t>((double(total)/(s*s)-black[dy][dx])*255/displayWhite);
+     }
+   }
    Shimeta::Frame f{};f.width=1632;f.height=1224;f.format=Shimeta::PixelFormat::Gray8;f.aps={gray.data(),gray.size()};apsView=isp.process(f);
+   cv::medianBlur(apsView,apsView,3); // simple spatial denoise, no temporal averaging
    bool freshEvent=false;
    {std::lock_guard<std::mutex> hold(slots[0].mutex);evsHost=slots[0].host;if(slots[0].sequence!=lastEvs){eventBytes=slots[0].bytes;lastEvs=slots[0].sequence;freshEvent=true;}}
    if(freshEvent){std::vector<Shimeta::EventCD> events;decoder.Decode(eventBytes.data(),eventBytes.size(),events);evsTotal+=events.size();eventView.setTo(cv::Scalar(0));for(auto e:events)if(unsigned(e.x)<768&&unsigned(e.y)<608)eventView.at<cv::Vec3b>(e.y,e.x)=e.polarity?cv::Vec3b(255,0,0):cv::Vec3b(0,0,255);}

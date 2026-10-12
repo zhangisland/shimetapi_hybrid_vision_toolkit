@@ -31,6 +31,7 @@ std::atomic<int>      g_pending_action{static_cast<int>(UiAction::None)};
 bool VideoReader::open(const std::string& path, double fallback_fps) {
     if(archiveNext_.valid()) {archiveNext_.wait();archiveNext_={};}
     archive_.reset();
+    rawFile_.close();rawFile_.clear();rawEntries_.clear();
     if(hv_archive::isArchive(path)) {
         archive_=std::make_shared<hv_archive::Reader>();archive_->open(path);
         fps_=archive_->fps();total_frames_=archive_->size();fallback_fps_=fallback_fps;
@@ -43,10 +44,55 @@ bool VideoReader::open(const std::string& path, double fallback_fps) {
     fallback_fps_ = fallback_fps > 0.0 ? fallback_fps : 30.0;
     current_index_ = 0;
     processed_ = 0;
+    const auto folder=std::filesystem::path(path).parent_path();
+    const auto rawPath=folder/"aps.vin.bin";
+    if(isp_.pattern=="gbrg" && std::filesystem::exists(rawPath)) {
+        rawFile_.open(rawPath,std::ios::binary);
+        std::ifstream meta(folder/"vin.frames.jsonl");
+        if(!rawFile_ || !meta) throw std::runtime_error("Cannot open original RAW10/index for playback");
+        const auto bytes=std::filesystem::file_size(rawPath);uint64_t end=0;
+        std::string line;
+        while(std::getline(meta,line)) {
+            if(line.find("\"aps\"")==line.npos) continue;
+            hv_archive::Entry e;
+            e.offset=hv_archive::field(line,"offset");e.bytes=hv_archive::field(line,"bytes");
+            e.width=hv_archive::field(line,"width");e.height=hv_archive::field(line,"height");e.stride=hv_archive::field(line,"stride");
+            if(e.width!=1632 || e.height!=1224 || e.stride<e.width*2 || e.stride>16384 ||
+               e.bytes<e.stride*e.height || e.bytes>16*1024*1024 || e.offset!=end ||
+               end>bytes || e.bytes>bytes-end || rawEntries_.size()>=1000000)
+                throw std::runtime_error("Invalid original RAW10 playback index/layout");
+            end+=e.bytes;rawEntries_.push_back(e);
+        }
+        if(end!=bytes || rawEntries_.size()!=total_frames_ || reader_->width()!=1632 || reader_->height()!=1224)
+            throw std::runtime_error("RAW10/AVI frame count or geometry mismatch; use files from the same session");
+        std::cout<<"APS playback display uses original aps.vin.bin RAW10 (read only)"<<std::endl;
+    }
     return true;
 }
 double VideoReader::fps() const { return fps_ > 0.0 ? fps_ : fallback_fps_; }
 uint64_t VideoReader::totalFrameCount() const { return total_frames_; }
+
+cv::Mat VideoReader::raw10Display(const hv_archive::Entry& e) {
+    // Same display-only 0 dB calibration and CFA averaging as VIN preview.
+    const double black[2][2]={{63.2667,63.2667},{63.2667,63.2667}};
+    const int s=isp_.previewScale;
+    const size_t w=(e.width/s)&~size_t(1),h=(e.height/s)&~size_t(1);
+    archiveGray_.resize(w*h);
+    for(size_t y=0;y<h;++y) for(size_t x=0;x<w;++x) {
+        unsigned total=0;
+        for(int by=0;by<s;++by) for(int bx=0;bx<s;++bx) {
+            size_t row=(y/2)*2*s+(y&1)+2*by,col=(x/2)*2*s+(x&1)+2*bx;
+            if(!row && !col) col=2; // first word is excluded in preview too
+            const auto* p=archiveRaw_.data()+row*e.stride+col*2;
+            total+=p[0]|(unsigned(p[1])<<8);
+        }
+        archiveGray_[y*w+x]=cv::saturate_cast<uint8_t>((double(total)/(s*s)-black[y&1][x&1])*255/14.9564);
+    }
+    isp_.config.black=0;isp_.config.mode="manual";isp_.config.gains={2.1144,1.0,1.7008};
+    isp_.wb.setMode("manual",isp_.config,false);
+    Shimeta::Frame f{};f.width=int(w);f.height=int(h);f.format=Shimeta::PixelFormat::Gray8;f.aps={archiveGray_.data(),archiveGray_.size()};
+    auto display=isp_.processFull(f);cv::medianBlur(display,display,3);return display;
+}
 
 /** @brief 顺序读到目标索引，NV12 原始字节 → BGR（工具包零 OpenCV 依赖）。 */
 bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::EvsTimestamp* timestamp) {
@@ -62,14 +108,17 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
             archiveNext_=std::async(std::launch::async,[reader,index]{std::vector<uint8_t> bytes;reader->read(index,bytes);return bytes;});
         }
         const auto decoded=std::chrono::steady_clock::now();
+        if(isp_.pattern=="gbrg") current_frame_=raw10Display(e);
+        else {
         const int scale=isp_.pattern=="none"?1:isp_.previewScale;
         const size_t w=(e.width/scale)&~size_t(1),h=(e.height/scale)&~size_t(1);
         archiveGray_.resize(w*h);
         for(size_t y=0;y<h;++y)for(size_t x=0;x<w;++x){const auto* p=archiveRaw_.data()+((y/2)*2*scale+(y&1))*e.stride+((x/2)*2*scale+(x&1))*2;const unsigned word=p[0]|(unsigned(p[1])<<8);archiveGray_[y*w+x]=uint8_t(std::min(word>>2,255u));}
         Shimeta::Frame f{};f.width=int(w);f.height=int(h);f.format=Shimeta::PixelFormat::Gray8;f.aps={archiveGray_.data(),archiveGray_.size()};
-        const auto converted=std::chrono::steady_clock::now();
-        current_frame_=isp_.processFull(f);frame=current_frame_.clone();++processed_;current_index_=target_index+1;
-        if(processed_<=3)std::cout<<"Archive APS stage ms read+decompress="<<std::chrono::duration<double,std::milli>(decoded-start).count()<<" raw-to-gray="<<std::chrono::duration<double,std::milli>(converted-decoded).count()<<" ISP="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-converted).count()<<std::endl;
+        current_frame_=isp_.processFull(f);
+        }
+        frame=current_frame_.clone();++processed_;current_index_=target_index+1;
+        if(processed_<=3)std::cout<<"Archive APS stage ms read+decompress="<<std::chrono::duration<double,std::milli>(decoded-start).count()<<" raw-to-display="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-decoded).count()<<std::endl;
         if(timestamp)*timestamp={};return true;
     }
     if (target_index < current_index_) return false;
@@ -78,7 +127,16 @@ bool VideoReader::readFrameAt(uint64_t target_index, cv::Mat& frame, Shimeta::Ev
         Shimeta::EvsTimestamp ts;
         if (!reader_->readApsFrame(f, &ts)) return false;
         if(current_index_++ != target_index) continue; // Skip obsolete preview work, retain sequential IO.
-        try { current_frame_ = isp_.process(f); ++processed_; }
+        try {
+            if(rawFile_.is_open()) {
+                const auto& e=rawEntries_.at(target_index);archiveRaw_.resize(size_t(e.bytes));
+                rawFile_.clear();rawFile_.seekg(std::streamoff(e.offset));
+                rawFile_.read(reinterpret_cast<char*>(archiveRaw_.data()),std::streamsize(e.bytes));
+                if(!rawFile_) throw std::runtime_error("Cannot read original RAW10 frame");
+                current_frame_=raw10Display(e);
+            } else current_frame_=isp_.process(f);
+            ++processed_;
+        }
         catch(const std::exception& e) { std::cerr << "APS decode: " << e.what() << std::endl; return false; }
         if(target_index<8) {
             const auto mean=cv::mean(current_frame_);
