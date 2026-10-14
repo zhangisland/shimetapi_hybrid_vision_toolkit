@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
     bool dump_timestamps = false;
     double fallback_fps = 30.0, speed = 1.0;
     int window_width=1280,window_height=720;
-    ApsIsp isp;isp.previewScale=4;bool precache=false;
+    ApsIsp isp;isp.previewScale=1;bool precache=false;
     int numeric_arg = 0;
     try {
     for (int i = 3; i < argc; ++i) {

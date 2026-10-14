@@ -36,7 +36,7 @@ struct Options {
  size_t maxBytes=1024ULL<<20;
  int lines=0,bus=-1,address=0x3c,profile=1;
  std::string diagnostic="record",previewBayer="gbrg",saveFormat="full";
- bool preview=false;int previewWidth=960,previewScale=4;
+ bool preview=false,snapshot=false;int previewWidth=960,previewScale=1;
  bool verifyRegs=true; // watchdog: re-read applied registers every second; disable with --no-verify for I2C probing
 };
 static Options parse(int argc,char** argv) {
@@ -44,6 +44,7 @@ static Options parse(int argc,char** argv) {
  for(int i=1;i<argc;++i) {
    std::string k=argv[i];
    if(k=="--preview") {o.preview=true;continue;}
+   if(k=="--snapshot") {o.preview=true;o.snapshot=true;continue;}
    if(k=="--no-verify") {o.verifyRegs=false;continue;}
    if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
@@ -79,6 +80,7 @@ static Options parse(int argc,char** argv) {
    else throw std::runtime_error("Unknown option: "+k);
  }
  if((o.output.empty()&&!o.preview)||o.timeout<=0||o.stall<=0) throw std::runtime_error("output and positive timeouts required");
+ if(o.snapshot&&o.output.empty()) throw std::runtime_error("Snapshot requires --output NEW");
  if(o.lines&&o.us) throw std::runtime_error("exposure lines and microseconds are mutually exclusive");
  if(o.us||o.lines) throw std::runtime_error("APS exposure control is not verified for HVS mode; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md");
  if((o.lines||o.gain>=0)&&o.bus<0) throw std::runtime_error("Manual control requires explicit --i2c-bus from board configuration (no scanning)");

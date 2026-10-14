@@ -10,6 +10,7 @@ I2C_ADDRESS="0x3c"
 APS_GAIN_DB=0
 OUTPUT="/app/recordings/gain0_new"
 SAVE_FORMAT="fast"
+PREVIEW_IMAGE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +38,9 @@ while [[ $# -gt 0 ]]; do
         --save-format)
             SAVE_FORMAT="$2"; shift 2
             ;;
+        --preview-image)
+            PREVIEW_IMAGE=1; shift
+            ;;
         --output)
             OUTPUT="$2"; shift 2
             ;;
@@ -51,6 +55,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
             echo "  --save-format SAVE_FORMAT        if save to disk faster (default: fast)"
             echo "  --output PATH           where to save recording files (default: /app/recordings/gain0_new)"
+            echo "  --preview-image         save only aps_preview.png with AVI playback brightness; no RAW/event/AVI"
             exit 0
             ;;
         *)
@@ -60,6 +65,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$PREVIEW_IMAGE" == "1" ]]; then
+    if [[ "$X5_VIN_BYPASS" != "1" ]]; then
+        echo "--preview-image requires --x5-vin-bypass 1" >&2
+        exit 1
+    fi
+    python3 hvs.py live --x5-vin-bypass -- --snapshot --output "$OUTPUT" --aps-gain-db "$APS_GAIN_DB" --i2c-bus "$I2C_BUS" --i2c-address "$I2C_ADDRESS"
+    exit 0
+fi
 
 ARGS=(--storage "$STORAGE" --seconds "$SECONDS_ARG" --max-mib "$MAX_MIB" --i2c-bus "$I2C_BUS" --i2c-address "$I2C_ADDRESS" --aps-gain-db "$APS_GAIN_DB" --save-format "$SAVE_FORMAT" --output "$OUTPUT")
 if [[ "$X5_VIN_BYPASS" == "1" ]]; then ARGS+=(--x5-vin-bypass); fi

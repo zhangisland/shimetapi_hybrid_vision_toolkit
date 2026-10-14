@@ -6,6 +6,7 @@
 #include <mutex>
 
 static int previewVin(const Options& o) {
+ if(o.snapshot&&fs::exists(o.output)) throw std::runtime_error("Snapshot output must be a new directory");
  cv::setNumThreads(2);
  std::signal(SIGINT,signalStop);std::signal(SIGTERM,signalStop);
  int lock=::open("/tmp/hvs-apx-capture.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
@@ -29,6 +30,7 @@ static int previewVin(const Options& o) {
  std::string failures[2];
  // Two producer buffers plus one GUI snapshot per stream, no growing queue.
  slots[0].bytes.resize(1048576);slots[1].bytes.resize(3995136);
+ const auto snapshotReady=ns()+uint64_t(o.warmup*1e9);
  auto receive=[&](int stream) {
   std::vector<uint8_t> back(slots[stream].bytes.size());
   while(!stop) {
@@ -38,10 +40,18 @@ static int previewVin(const Options& o) {
     const size_t expected=stream?3995136:1048576;
     if(!im.plane[0]||im.size[0]!=expected||im.width!=(stream?1632:4096)||im.height!=(stream?1224:256)||im.stride!=(stream?3264:4096))
      throw std::runtime_error("Unexpected VIN preview layout");
+    if(o.snapshot) {
+     // Drain EVS and warm-up APS without storing them; retain only the first ready APS.
+     if(stream&&ns()>=snapshotReady) {
+      std::memcpy(slots[1].bytes.data(),im.plane[0],expected);
+      slots[1].sequence=1;stop=true;
+     }
+    } else {
     std::memcpy(back.data(),im.plane[0],expected);
     const auto received=ns();
     {std::lock_guard<std::mutex> hold(slots[stream].mutex);auto& slot=slots[stream];slot.bytes.swap(back);slot.width=im.width;slot.height=im.height;slot.stride=im.stride;slot.host=received;++slot.sequence;}
     ++counts[stream];
+    }
    } catch(const std::exception& e){failures[stream]=e.what();stop=true;}
    if(x5_release(camera,stream,&im)){failures[stream]="VIN release failed";stop=true;}
   }
@@ -49,6 +59,28 @@ static int previewVin(const Options& o) {
  std::thread evs(receive,0),aps;
  try {aps=std::thread(receive,1);}catch(...){stop=true;evs.join();throw;}
  struct Join {std::atomic<bool>& stop;std::thread& a;std::thread& b;~Join(){stop=true;if(a.joinable())a.join();if(b.joinable())b.join();}} join{stop,evs,aps};
+ if(o.snapshot) {
+  while(!stop&&!interrupted) {
+   if(ns()>snapshotReady+uint64_t(o.timeout*1e9)) throw std::runtime_error("Snapshot APS timeout");
+   std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  stop=true;evs.join();aps.join();
+  for(const auto& error:failures) if(!error.empty()) throw std::runtime_error(error);
+  if(!slots[1].sequence) throw std::runtime_error("No snapshot captured");
+  if(o.verifyRegs&&sensor) apx::verify(*sensor,regs);
+  owner.reset();sensor.reset();
+  cv::Mat nv12(1224*3/2,1632,CV_8UC1,cv::Scalar(128));
+  const auto& raw=slots[1].bytes;
+  for(size_t i=0;i<size_t(1632)*1224;++i) {
+   const unsigned word=raw[2*i]|(unsigned(raw[2*i+1])<<8);
+   nv12.data[i]=uint8_t(std::min<unsigned>(word>>2,255));
+  }
+  // Neutral UV plus the standard NV12 video-range conversion: no ISP or extra brightening.
+  cv::Mat image;cv::cvtColor(nv12,image,cv::COLOR_YUV2BGR_NV12);
+  fs::create_directories(o.output);
+  if(!cv::imwrite((o.output/"aps_preview.png").string(),image)) throw std::runtime_error("Snapshot PNG save failed");
+  return 0;
+ }
  hv_player::ApsIsp isp;isp.pattern=o.previewBayer;isp.previewScale=o.previewScale;
  // Display calibration for the measured 0 dB scene; source RAW is untouched.
  const double black[2][2]={{63.2667,63.2667},{63.2667,63.2667}};

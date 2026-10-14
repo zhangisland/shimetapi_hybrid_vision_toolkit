@@ -166,7 +166,7 @@ def main(argv=None):
     p.add_argument('--speed', type=number, default=1)
     p.add_argument('--window-width', type=int, default=1280, help='Maximum initial player canvas width')
     p.add_argument('--window-height', type=int, default=720, help='Maximum initial player canvas height')
-    p.add_argument('--aps-preview-scale', type=int, choices=[1,2,4], default=4, help='Display-only CFA subsampling; 1 preserves full-resolution processing')
+    p.add_argument('--aps-preview-scale', type=int, choices=[1,2,4], default=1, help='Display-only CFA subsampling; 1 preserves full-resolution processing')
     p.add_argument('--precache-aps', action='store_true', help='Optional full-sequence ISP preparation before playback')
     p.add_argument('--dump-timestamps', action='store_true', help='Inspect without a GUI')
     for kind in ('csv', 'npz'):
