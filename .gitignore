@@ -1,3 +1,5 @@
+tmp*
+tests/
 recordings/
 tools/*
 !tools/apx003cc_diagnostics/

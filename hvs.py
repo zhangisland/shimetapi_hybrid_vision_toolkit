@@ -314,8 +314,10 @@ def main(argv=None):
         return 0
     folder = args.output.resolve()
     if args.command == 'record':
-        if args.timeout <= 0 or args.aps_stall_timeout <= 0 or not 1 <= args.max_mib <= 2048:
-            parser.error('--timeout must be positive; --max-mib must be in [1,2048]')
+        if args.timeout <= 0 or args.aps_stall_timeout <= 0 or args.max_mib < 1:
+            parser.error('--timeout and --aps-stall-timeout must be positive; --max-mib must be >=1')
+        if not args.x5_vin_bypass and args.max_mib > 2048:
+            parser.error('Legacy SDK recording requires --max-mib <=2048 (AVI RIFF limit); use native --x5-vin-bypass --save-format fast for larger buffers')
         if any(n < 2 or n > 8192 or n % 2 for n in (args.width, args.height, args.evs_width, args.evs_height)):
             parser.error('Dimensions must be even integers in [2,8192]')
         if folder.exists():

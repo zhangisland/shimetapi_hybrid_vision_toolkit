@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <functional>
+#include <string>
 
 // One reservation and one copy per DMA plane. No allocation or IO in append.
 // Readers may iterate only after ALL producers have joined.
@@ -12,8 +13,12 @@ class MemoryArena {
 public:
     static size_t payloadCapacity(size_t budget, uint64_t available) {
         constexpr size_t workspace=32ULL<<20, reserve=256ULL<<20;
-        if(budget<64ULL<<20 || budget>2048ULL<<20 || available<budget+reserve)
-            throw std::runtime_error("Insufficient MemAvailable: max-mib (64..2048) plus 256 MiB SDK/system reserve required");
+        if(budget<64ULL<<20)
+            throw std::runtime_error("native --max-mib must be >=64 including 32 MiB workspace");
+        if(available<reserve || budget>available-reserve)
+            throw std::runtime_error("Insufficient MemAvailable: requested budget=" + std::to_string(budget/1048576) +
+                " MiB, available=" + std::to_string(available/1048576) +
+                " MiB; leave 256 MiB SDK/system reserve (reduce --max-mib)");
         return budget-workspace;
     }
     struct Header {

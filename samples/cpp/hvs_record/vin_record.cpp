@@ -65,7 +65,7 @@ static Options parse(int argc,char** argv) {
    else if(k=="--warmup") {if(n>300) throw std::runtime_error("warmup must be <=300");o.warmup=n;}
    else if(k=="--timeout") o.timeout=n;
    else if(k=="--aps-stall-timeout") o.stall=n;
-   else if(k=="--max-mib") {if(n<64||n>2048) throw std::runtime_error("native --max-mib must be 64..2048 including 32 MiB workspace");o.maxBytes=size_t(n*1048576);}
+   else if(k=="--max-mib") {if(n<64||n>=double(SIZE_MAX)/1048576.0) throw std::runtime_error("native --max-mib must be >=64 and fit the address space; budget must fit MemAvailable minus 256 MiB");o.maxBytes=size_t(n*1048576);}
    else if(k=="--aps-exposure-lines") o.lines=integer(1,1162);
    else if(k=="--aps-exposure-us") {if(n==0) throw std::runtime_error("exposure must be positive");o.us=n;}
    else if(k=="--aps-line-time-us") {if(n==0) throw std::runtime_error("line time must be positive");o.lineUs=n;}

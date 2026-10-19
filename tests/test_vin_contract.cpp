@@ -19,6 +19,11 @@ int main() {
  assert(MemoryArena::payloadCapacity(64ULL<<20,320ULL<<20)==32ULL<<20);
  rejects([]{MemoryArena::payloadCapacity(64ULL<<20,(320ULL<<20)-1);});
  rejects([]{MemoryArena::payloadCapacity(1ULL<<20,UINT64_MAX);});
+ // Large budgets are governed by current available RAM, not a 2 GiB ceiling.
+ assert(MemoryArena::payloadCapacity(3328ULL<<20,3584ULL<<20)==3296ULL<<20);
+ rejects([]{MemoryArena::payloadCapacity(3328ULL<<20,(3584ULL<<20)-1);});
+ rejects([]{MemoryArena::payloadCapacity(SIZE_MAX,UINT64_MAX);});
+ rejects([]{MemoryArena::payloadCapacity(64ULL<<20,0);});
  // Capacity accounts for headers/alignment; copies own storage after DMA reuse.
  MemoryArena a(1024*1024);
  auto producer=[&](int stream) {

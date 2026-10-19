@@ -4,7 +4,7 @@ set -euo pipefail
 X5_VIN_BYPASS=1
 STORAGE="memory"
 SECONDS_ARG=5
-MAX_MIB=1024
+MAX_MIB=2048
 I2C_BUS=6
 I2C_ADDRESS="0x3c"
 APS_GAIN_DB=0
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --x5-vin-bypass 0|1     pass --x5-vin-bypass to hvs.py when 1 (default: 1)"
             echo "  --storage MODE          storage mode (default: memory)"
             echo "  --seconds N             recording duration in seconds (default: 5)"
-            echo "  --max-mib N             max recording size in MiB (default: 1024)"
+            echo "  --max-mib N             RAM budget in MiB, includes 32 MiB workspace; native limit: MemAvailable minus 256 MiB (default: 1024)"
             echo "  --i2c-bus N             I2C bus number (default: 6)"
             echo "  --i2c-address ADDR      I2C address (default: 0x3c)"
             echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
