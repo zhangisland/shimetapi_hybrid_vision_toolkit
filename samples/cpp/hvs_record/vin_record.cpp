@@ -46,12 +46,12 @@ static Options parse(int argc,char** argv) {
    if(k=="--preview") {o.preview=true;continue;}
    if(k=="--snapshot") {o.preview=true;o.snapshot=true;continue;}
    if(k=="--no-verify") {o.verifyRegs=false;continue;}
-   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
+   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast|raw|zstd] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
    std::string v=argv[++i];
    if(k=="--aps-bayer") {if(v!="none"&&v!="gbrg"&&v!="rggb"&&v!="bggr"&&v!="grbg")throw std::runtime_error("Invalid preview Bayer pattern");o.previewBayer=v;continue;}
    if(k=="--export-session") {o.exportSession=v;continue;}
-   if(k=="--save-format") {if(v!="fast"&&v!="full")throw std::runtime_error("save-format fast|full");o.saveFormat=v;continue;}
+   if(k=="--save-format") {if(v!="fast"&&v!="full"&&v!="zstd"&&v!="raw")throw std::runtime_error("save-format fast|raw|zstd|full");o.saveFormat=v;continue;}
    if(k=="--output") {o.output=v;continue;}
    if(k=="--storage") {if(v!="memory") throw std::runtime_error("native VIN requires --storage memory; legacy SDK provides disk baseline");continue;}
    if(k=="--ram-dir") continue; // deprecated compatibility; no tmpfs is used
@@ -437,7 +437,7 @@ static int run(const Options& o) {
    std::cout<<"Diagnostic only: payload intentionally discarded; no complete recording marker\n";
  } else {
    for(;;) {
-     try {if(o.saveFormat=="fast")saveFast(o,arena,stats[1].fps(),report.str());else save(o,arena,stats[1].fps(),report.str());break;}
+     try {if(o.saveFormat=="raw")saveQuick(o,arena,stats[1].fps(),report.str());else if(o.saveFormat=="fast"||o.saveFormat=="zstd")saveFast(o,arena,stats[1].fps(),report.str(),o.saveFormat=="fast");else save(o,arena,stats[1].fps(),report.str());break;}
      catch(const std::exception& e) {
        std::cerr<<"SAVE FAILED: "<<e.what()<<"\nAll input retained in this process. Repair destination, then: touch '"<<(o.output/"retry.request").string()<<"'\nDo NOT kill the process; pure RAM cannot survive power loss/SIGKILL.\n";
        // Signals do not discard the sole copy. A filesystem request retries
@@ -456,7 +456,7 @@ static int run(const Options& o) {
 int main(int argc,char** argv) {
  try {const auto options=parse(argc,argv);if(!options.exportSession.empty())return exportFast(options);
 #ifndef HVS_HAVE_ZSTD
- if(options.saveFormat=="fast")throw std::runtime_error("Fast save requires a zstd-enabled build");
+ if(options.saveFormat=="zstd"||options.saveFormat=="fast")throw std::runtime_error("Zstd save requires a zstd-enabled build");
 #endif
  if(options.preview) {
 #ifdef HVS_VIN_PREVIEW

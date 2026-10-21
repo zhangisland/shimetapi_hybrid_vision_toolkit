@@ -2,6 +2,7 @@
 #include <cassert>
 #include <thread>
 #include <iostream>
+#include <sstream>
 #include "../samples/cpp/player/replay_timeline.h"
 namespace fake_player {extern std::atomic<int> delayMs,reads;}
 using namespace hv_player;
@@ -17,13 +18,37 @@ static void archivePlaybackContract() {
         out.write(hv_archive::magic,8);hv_archive::Compressor compressor;const auto n=compressor.compress(raw.data(),raw.size(),packed);
         for(size_t i=0;i<3;++i){hv_archive::Entry e{};e.bytes=raw.size();e.hostNs=1000000000+i*33333333;e.width=1632;e.height=1224;e.stride=3280;e.format=0x2b;e.offset=i*raw.size();e.archiveOffset=8+i*n;e.compressedBytes=n;hv_archive::metadata(meta,e,true,0);out.write(reinterpret_cast<const char*>(packed.data()),n);}
     }
+    cv::Mat compressedReference;
     {
         VideoReader reader;ApsIsp isp;isp.pattern="gbrg";isp.previewScale=4;reader.setIsp(isp);assert(reader.open((folder/"aps.vin.zst").string(),30));
         Shimeta::Frame f{};f.width=1632;f.height=1224;f.format=Shimeta::PixelFormat::Gray8;f.aps={gray.data(),gray.size()};
-        for(uint64_t index:{0,1,0,2}){cv::Mat actual;assert(reader.readFrameAt(index,actual));const auto expected=isp.process(f);assert(cv::norm(actual,expected,cv::NORM_INF)==0);}
+        for(uint64_t index:{0,1,0,2}){cv::Mat actual;assert(reader.readFrameAt(index,actual));if(compressedReference.empty())compressedReference=actual.clone();assert(cv::norm(actual,compressedReference,cv::NORM_INF)==0);}
         cv::Mat end;assert(!reader.readFrameAt(3,end));
     }
-    std::filesystem::remove(folder/"aps.vin.zst");std::filesystem::remove(folder/"vin.frames.jsonl");std::filesystem::remove(folder);
+    {
+        std::ofstream out(folder/"aps.vin.bin",std::ios::binary),meta(folder/"vin.frames.jsonl");
+        for(size_t i=0;i<3;++i){hv_archive::Entry e{};e.bytes=raw.size();e.hostNs=1000000000+i*33333333;e.width=1632;e.height=1224;e.stride=3280;e.format=0x2b;e.offset=e.archiveOffset=i*raw.size();e.compressedBytes=e.bytes;hv_archive::metadata(meta,e,true,0,false);out.write(reinterpret_cast<const char*>(raw.data()),raw.size());}
+    }
+    {
+        VideoReader reader;ApsIsp isp;isp.pattern="gbrg";isp.previewScale=4;reader.setIsp(isp);assert(reader.open((folder/"aps.vin.bin").string(),30));
+        Shimeta::Frame f{};f.width=1632;f.height=1224;f.format=Shimeta::PixelFormat::Gray8;f.aps={gray.data(),gray.size()};
+        for(uint64_t index:{0,1,0,2}){cv::Mat actual;assert(reader.readFrameAt(index,actual));assert(!compressedReference.empty());assert(cv::norm(actual,compressedReference,cv::NORM_INF)==0);}
+        cv::Mat end;assert(!reader.readFrameAt(3,end));
+    }
+    {
+        std::vector<uint8_t> evs(4096*256,0);
+        std::ofstream out(folder/"evs.vin.bin",std::ios::binary),meta(folder/"vin.frames.jsonl",std::ios::app);
+        hv_archive::Entry e{};e.bytes=e.compressedBytes=evs.size();e.hostNs=1000000000;e.width=e.stride=4096;e.height=256;
+        hv_archive::metadata(meta,e,false,0,false);out.write(reinterpret_cast<const char*>(evs.data()),evs.size());
+    }
+    {
+        std::ostringstream timestamps;
+        assert(dumpTimestamps((folder/"evs.vin.bin").string(),(folder/"aps.vin.bin").string(),timestamps));
+        assert(timestamps.str().find("VIN_metadata_not_exposure_time")!=std::string::npos);
+        assert(timestamps.str().find("EVS,0,")!=std::string::npos);
+        assert(timestamps.str().find("APS,2,")!=std::string::npos);
+    }
+    std::filesystem::remove(folder/"evs.vin.bin");std::filesystem::remove(folder/"aps.vin.bin");std::filesystem::remove(folder/"aps.vin.zst");std::filesystem::remove(folder/"vin.frames.jsonl");std::filesystem::remove(folder);
 #endif
 }
 int main(int argc,char** argv) {

@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             OUTPUT="$2"; shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--output PATH]"
+            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--save-format fast|raw|zstd|full] [--output PATH]"
             echo "  --x5-vin-bypass 0|1     pass --x5-vin-bypass to hvs.py when 1 (default: 1)"
             echo "  --storage MODE          storage mode (default: memory)"
             echo "  --seconds N             recording duration in seconds (default: 5)"
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --i2c-bus N             I2C bus number (default: 6)"
             echo "  --i2c-address ADDR      I2C address (default: 0x3c)"
             echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
-            echo "  --save-format SAVE_FORMAT        if save to disk faster (default: fast)"
+            echo "  --save-format FORMAT     fast: low-CPU compressed VIN; raw: native VIN; zstd: verified compression; full: RAW + AVI/events (default: fast)"
             echo "  --output PATH           where to save recording files (default: /app/recordings/gain0_new)"
             echo "  --preview-image         save only aps_preview.png with AVI playback brightness; no RAW/event/AVI"
             exit 0

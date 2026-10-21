@@ -129,7 +129,7 @@ def main(argv=None):
     r.add_argument('--x5-vin-bypass', action='store_true',
                    help='Native independent dual VIN; requires build --with-vin-record')
     r.add_argument('--legacy-sdk-bypass', action='store_true', help='Old patched SDK/tmpfs baseline only')
-    r.add_argument('--save-format', choices=['full','fast'], default='full', help='full: existing four files; fast: lossless raw archive, directly playable and exportable')
+    r.add_argument('--save-format', choices=['full','fast','raw','zstd'], default='full', help='fast: low-CPU compressed VIN; raw: native uncompressed VIN; zstd: compressed with full readback; full: four files')
     r.add_argument('--diagnostic', choices=['record', 'receive', 'copy'], default='record')
     r.add_argument('--warmup', type=number, default=1)
     exposure = r.add_mutually_exclusive_group()
@@ -191,8 +191,8 @@ def main(argv=None):
                 raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
         if args.x5_vin_bypass and (args.aps_exposure_us is not None or args.aps_exposure_lines is not None):
             parser.error('HVS exposure control is not verified; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md')
-        if args.save_format == 'fast' and not args.x5_vin_bypass:
-            parser.error('--save-format fast requires --x5-vin-bypass')
+        if args.save_format in ('fast', 'raw', 'zstd') and not args.x5_vin_bypass:
+            parser.error('--save-format fast/raw/zstd requires --x5-vin-bypass')
         manual = any(x is not None for x in (args.aps_exposure_us, args.aps_exposure_lines, args.aps_gain_db))
         if args.x5_vin_bypass and args.legacy_sdk_bypass:
             parser.error('Choose native VIN or the legacy SDK baseline')
@@ -353,8 +353,10 @@ def main(argv=None):
         summary = read_summary(folder)
         if not summary or summary.get('status') != 'complete':
             raise RuntimeError('Recording incomplete or not finalized; inspect summary.txt and capture logs')
-        archive = summary.get('session_format') == 'vin_zstd_v1'
-        evs_name, aps_name = ('evs.vin.zst', 'aps.vin.zst') if archive else ('events.raw', 'aps.avi')
+        raw_vin = summary.get('session_format') == 'vin_raw_v1'
+        archive = raw_vin or summary.get('session_format') == 'vin_zstd_v1'
+        evs_name, aps_name = (('evs.vin.bin', 'aps.vin.bin') if raw_vin else
+                              ('evs.vin.zst', 'aps.vin.zst') if archive else ('events.raw', 'aps.avi'))
         for name in (evs_name, aps_name):
             if not (folder / name).is_file() or not (folder / name).stat().st_size:
                 raise RuntimeError(f'Missing or empty {name}')
