@@ -29,47 +29,51 @@ class VinIntegration(unittest.TestCase):
         return dict(line.split('=', 1) for line in (folder/'summary.txt').read_text().splitlines() if '=' in line)
 
     def test_quick_raw_export_preserves_bytes_and_rejects_truncation(self):
-        import hashlib
-        with tempfile.TemporaryDirectory() as tmp:
-            p, folder, _ = self.start(tmp, ['--save-format', 'raw'])
-            self.assertEqual(p.wait(30), 0, Path(tmp, 'log.txt').read_text())
-            summary = self.summary(folder)
-            self.assertEqual(summary['session_format'], 'vin_raw_v1')
-            self.assertEqual(summary['compress_ns'], '0')
-            self.assertEqual(summary['verify_ns'], '0')
-            for name in ['aps.avi', 'events.raw', 'aps.vin.zst', 'recording.storage']:
-                self.assertFalse((folder/name).exists())
-            rows = [json.loads(line) for line in (folder/'vin.frames.jsonl').read_text().splitlines()]
-            self.assertTrue(rows)
-            self.assertTrue(all('fnv1a64' not in row for row in rows))
-            for stream in ['aps', 'evs']:
-                data = (folder/f'{stream}.vin.bin').read_bytes()
-                offset = 0
-                for row in (r for r in rows if r['stream'] == stream):
-                    self.assertEqual(row['offset'], offset)
-                    self.assertEqual(row['archive_offset'], offset)
-                    self.assertEqual(row['archive_bytes'], row['bytes'])
-                    self.assertGreater(row['host_ns'], 0)
-                    if stream == 'aps':
-                        self.assertEqual(data[offset:offset+2], bytes([row['frame_id'] & 255, 0]))
-                        self.assertEqual(row['stride'], 3280)
-                    offset += row['bytes']
-                self.assertEqual(offset, len(data))
-            hashes = {s: hashlib.sha256((folder/f'{s}.vin.bin').read_bytes()).hexdigest() for s in ['aps', 'evs']}
-            output = Path(tmp)/'exported'
-            result = subprocess.run([EXE, '--export-session', str(folder), '--output', str(output), '--max-mib', '64'], capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
-            self.assertEqual(self.summary(output)['session_format'], 'legacy_four_files')
-            for stream, digest in hashes.items():
-                self.assertEqual(hashlib.sha256((output/f'{stream}.vin.bin').read_bytes()).hexdigest(), digest)
-                self.assertEqual(hashlib.sha256((folder/f'{stream}.vin.bin').read_bytes()).hexdigest(), digest)
-            raw = folder/'aps.vin.bin'
-            with raw.open('r+b') as f:
-                f.truncate(raw.stat().st_size-1)
-            bad = Path(tmp)/'bad'
-            result = subprocess.run([EXE, '--export-session', str(folder), '--output', str(bad), '--max-mib', '64'], capture_output=True, text=True, timeout=30)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse((bad/'summary.txt').exists())
+        for mode in ['raw', 'native']:
+            import hashlib
+            with tempfile.TemporaryDirectory() as tmp:
+                p, folder, _ = self.start(tmp, ['--save-format', mode])
+                self.assertEqual(p.wait(30), 0, Path(tmp, 'log.txt').read_text())
+                summary = self.summary(folder)
+                self.assertEqual(summary['session_format'], 'vin_raw_v1')
+                self.assertEqual(summary['compress_ns'], '0')
+                self.assertEqual(summary['verify_ns'], '0')
+                if mode == 'native':
+                    self.assertEqual(summary['sync_ns'], '0')
+                    self.assertEqual(summary['durability'], 'kernel_writeback_pending')
+                for name in ['aps.avi', 'events.raw', 'aps.vin.zst', 'recording.storage']:
+                    self.assertFalse((folder/name).exists())
+                rows = [json.loads(line) for line in (folder/'vin.frames.jsonl').read_text().splitlines()]
+                self.assertTrue(rows)
+                self.assertTrue(all('fnv1a64' not in row for row in rows))
+                for stream in ['aps', 'evs']:
+                    data = (folder/f'{stream}.vin.bin').read_bytes()
+                    offset = 0
+                    for row in (r for r in rows if r['stream'] == stream):
+                        self.assertEqual(row['offset'], offset)
+                        self.assertEqual(row['archive_offset'], offset)
+                        self.assertEqual(row['archive_bytes'], row['bytes'])
+                        self.assertGreater(row['host_ns'], 0)
+                        if stream == 'aps':
+                            self.assertEqual(data[offset:offset+2], bytes([row['frame_id'] & 255, 0]))
+                            self.assertEqual(row['stride'], 3280)
+                        offset += row['bytes']
+                    self.assertEqual(offset, len(data))
+                hashes = {s: hashlib.sha256((folder/f'{s}.vin.bin').read_bytes()).hexdigest() for s in ['aps', 'evs']}
+                output = Path(tmp)/'exported'
+                result = subprocess.run([EXE, '--export-session', str(folder), '--output', str(output), '--max-mib', '64'], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertEqual(self.summary(output)['session_format'], 'legacy_four_files')
+                for stream, digest in hashes.items():
+                    self.assertEqual(hashlib.sha256((output/f'{stream}.vin.bin').read_bytes()).hexdigest(), digest)
+                    self.assertEqual(hashlib.sha256((folder/f'{stream}.vin.bin').read_bytes()).hexdigest(), digest)
+                raw = folder/'aps.vin.bin'
+                with raw.open('r+b') as f:
+                    f.truncate(raw.stat().st_size-1)
+                bad = Path(tmp)/'bad'
+                result = subprocess.run([EXE, '--export-session', str(folder), '--output', str(bad), '--max-mib', '64'], capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((bad/'summary.txt').exists())
 
     def test_quick_save_failure_retains_ram_and_retries(self):
         with tempfile.TemporaryDirectory() as tmp:

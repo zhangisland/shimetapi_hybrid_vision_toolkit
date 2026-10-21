@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """HVS / RDK-X5: build, record, graceful stop, playback, CSV/NPZ export and diagnosis."""
 import argparse
+import json
+import signal
 import hashlib
 import math
 import os
@@ -14,6 +16,79 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_BUILD = ROOT / 'out' / 'x5' / 'hvs-build'
+
+_background_writers = []
+
+def process_identity(pid):
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return None if fields[0] == 'Z' else fields[19]
+    except (OSError, IndexError):
+        return None
+
+
+def recording_status(folder):
+    summary = read_summary(folder)
+    if summary:
+        return {'state': 'complete' if summary.get('status') == 'complete' else 'capture_failed',
+                'durability': summary.get('durability', 'fsync_complete'), 'output': str(folder)}
+    try:
+        job = json.loads((folder/'writer.json').read_text())
+    except (OSError, ValueError):
+        return {'state': 'unknown_or_not_started', 'output': str(folder)}
+    alive = job.get('start_ticks') is not None and process_identity(job['pid']) == job['start_ticks']
+    if alive and (folder/'save.failed').exists():
+        return {'state': 'save_failed_retry_required', 'reason': (folder/'save.failed').read_text(),
+                'retry': str(folder/'retry.request'), **job}
+    return {**job, 'state': ('saving' if (folder/'capture.done').exists() else 'capturing')
+            if alive else 'interrupted_no_complete_recording'}
+
+
+def record_in_background(command, folder, env):
+    # Spawn BEFORE the camera/SDK starts. No fork from a multithreaded SDK process.
+    _background_writers[:] = [p for p in _background_writers if p.poll() is None]
+    log_path = folder.parent/(folder.name+'.record.log')
+    with log_path.open('x') as log:
+        proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                env=env, start_new_session=True)
+    _background_writers.append(proc)
+    job = {'pid': proc.pid, 'start_ticks': process_identity(proc.pid), 'log': str(log_path),
+           'output': str(folder), 'completion_marker': str(folder/'summary.txt')}
+    old_term = signal.signal(signal.SIGTERM, lambda *_: proc.send_signal(signal.SIGTERM) if proc.poll() is None else None)
+    registered = False
+    started = time.monotonic()
+    try:
+        with log_path.open() as tail:
+            while True:
+                try:
+                    new = tail.read()
+                    if new:
+                        print(new, end='', flush=True)
+                    if folder.is_dir() and not registered:
+                        (folder/'writer.json').write_text(json.dumps(job)+'\n')
+                        registered = True
+                    code = proc.poll()
+                    if code is not None:
+                        print(tail.read(), end='', flush=True)
+                        return code
+                    if (folder/'capture.done').exists():
+                        fields = dict(line.split('=',1) for line in (folder/'capture.done').read_text().splitlines() if '=' in line)
+                        print(f'CAPTURE FINISHED; camera released; background save pending (PID {proc.pid}).', flush=True)
+                        if 'capture_stop_host_ns' in fields:
+                            delay = time.monotonic()-int(fields['capture_stop_host_ns'])/1e9
+                            print(f'Capture end to foreground return seconds={delay:.3f}', flush=True)
+                        print(f'Foreground seconds={time.monotonic()-started:.3f}; log={log_path}', flush=True)
+                        print(f'Check: python3 hvs.py status --output {folder}', flush=True)
+                        print('Saved files are ready when summary.txt appears. Background jobs retain RAM; further captures require sufficient MemAvailable.', flush=True)
+                        return 0 if fields.get('status') == 'complete' else 2
+                    time.sleep(.05)
+                except KeyboardInterrupt:
+                    if proc.poll() is None:
+                        proc.send_signal(signal.SIGINT)
+                        print('Stop requested; waiting for camera shutdown before background save.', flush=True)
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+
 
 def number(text):
     value = float(text)
@@ -129,7 +204,8 @@ def main(argv=None):
     r.add_argument('--x5-vin-bypass', action='store_true',
                    help='Native independent dual VIN; requires build --with-vin-record')
     r.add_argument('--legacy-sdk-bypass', action='store_true', help='Old patched SDK/tmpfs baseline only')
-    r.add_argument('--save-format', choices=['full','fast','raw','zstd'], default='full', help='fast: low-CPU compressed VIN; raw: native uncompressed VIN; zstd: compressed with full readback; full: four files')
+    r.add_argument('--save-format', choices=['full','fast','native','raw','zstd'], default='full', help='fast: background compressed VIN; native: background buffered raw VIN; raw: wait for durable raw; zstd: full verified compression; full: four files')
+    r.add_argument('--wait-save', action='store_true', help='For fast/native, wait for saving too; native still uses close-only completion')
     r.add_argument('--diagnostic', choices=['record', 'receive', 'copy'], default='record')
     r.add_argument('--warmup', type=number, default=1)
     exposure = r.add_mutually_exclusive_group()
@@ -155,6 +231,8 @@ def main(argv=None):
     export.add_argument('--input', type=Path, required=True)
     export.add_argument('--output', type=Path, required=True)
     export.add_argument('--max-mib', type=number, default=1024)
+    status = sub.add_parser('status', help='Inspect capture/background-save state')
+    status.add_argument('--output', type=Path, required=True)
     s = sub.add_parser('stop', help='Request graceful stop from another terminal')
     s.add_argument('--output', type=Path, required=True)
     s.add_argument('--wait', type=number, default=30)
@@ -182,6 +260,10 @@ def main(argv=None):
     d = sub.add_parser('diagnose', help='Read-only platform/library checks')
     d.add_argument('--build-dir', type=Path, default=DEFAULT_BUILD)
     args = parser.parse_args(argv)
+    if args.command == 'status':
+        state = recording_status(args.output.resolve())
+        print(json.dumps(state, ensure_ascii=False))
+        return 2 if state['state'] in ('save_failed_retry_required','interrupted_no_complete_recording','capture_failed') else 0
     if args.command == 'aps-capabilities':
         print((ROOT / 'tools/aps_capabilities.json').read_text(encoding='utf-8'))
         return 0
@@ -191,8 +273,8 @@ def main(argv=None):
                 raise RuntimeError('APS '+key+' unavailable in bundled SDK. Run aps-capabilities; no device setting was changed.')
         if args.x5_vin_bypass and (args.aps_exposure_us is not None or args.aps_exposure_lines is not None):
             parser.error('HVS exposure control is not verified; 0x015A/B are known invalid. No hardware opened. See APX003CC_PRIOR_KNOWLEDGE.md')
-        if args.save_format in ('fast', 'raw', 'zstd') and not args.x5_vin_bypass:
-            parser.error('--save-format fast/raw/zstd requires --x5-vin-bypass')
+        if args.save_format in ('fast', 'native', 'raw', 'zstd') and not args.x5_vin_bypass:
+            parser.error('--save-format fast/native/raw/zstd requires --x5-vin-bypass')
         manual = any(x is not None for x in (args.aps_exposure_us, args.aps_exposure_lines, args.aps_gain_db))
         if args.x5_vin_bypass and args.legacy_sdk_bypass:
             parser.error('Choose native VIN or the legacy SDK baseline')
@@ -343,7 +425,9 @@ def main(argv=None):
         if binary.is_file():
             print(f'Record executable: {binary.resolve()} sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}', flush=True)
         print('Record arguments:', command[1:], flush=True)
-        # Replace this process: Ctrl+C/SIGTERM reaches the C++ signal handler directly.
+        if args.x5_vin_bypass and args.diagnostic == 'record' and args.save_format in ('fast','native') and not args.wait_save:
+            return record_in_background(command, folder, runtime_env(vin_bypass=args.legacy_sdk_bypass))
+        # Synchronous path: Ctrl+C/SIGTERM reaches the C++ handler directly.
         os.execve(str(binary), command, runtime_env(vin_bypass=args.legacy_sdk_bypass))
     if args.command == 'play':
         if args.speed <= 0:

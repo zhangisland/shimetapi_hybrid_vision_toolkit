@@ -2,8 +2,8 @@
 #include "../common/vin_archive.h"
 // Native sample strategy: capture raw bytes in DDR, then write each stream once.
 // No compression, pixel conversion, payload hash or full readback on this path.
-// Unlike the vendor sample's close-only copy, completion includes fsync.
-static void saveQuick(const Options& o,const MemoryArena& arena,double fps,const std::string& report) {
+// native matches the vendor close-only completion; raw additionally waits for fsync.
+static void saveQuick(const Options& o,const MemoryArena& arena,double fps,const std::string& report,bool durable=true) {
  const auto begin=ns();const fs::path stage=o.output/"saving.partial";fs::create_directories(stage);
  if(fs::space(stage).available<arena.used()+(32ULL<<20))throw std::runtime_error("Insufficient space for raw VIN; free space and retry");
  std::ofstream meta(stage/"vin.frames.jsonl",std::ios::trunc);
@@ -28,27 +28,29 @@ static void saveQuick(const Options& o,const MemoryArena& arena,double fps,const
   });
   checkedClose(out);writeNs+=ns()-writing;
   if(fs::file_size(stage/name)!=offsets[stream])throw std::runtime_error("Raw VIN size mismatch");
-  std::cout<<"Raw VIN written: "<<name<<" bytes="<<offsets[stream]<<"; syncing storage"<<std::endl;
-  const auto syncing=ns();RecordingStorage::syncFile(stage/name);syncNs+=ns()-syncing;
+  std::cout<<"Raw VIN written: "<<name<<" bytes="<<offsets[stream]<<(durable?"; syncing storage":"; closed (kernel writeback pending)")<<std::endl;
+  if(durable){const auto syncing=ns();RecordingStorage::syncFile(stage/name);syncNs+=ns()-syncing;}
  }
- checkedClose(meta);RecordingStorage::syncFile(stage/"vin.frames.jsonl");
+ checkedClose(meta);if(durable)RecordingStorage::syncFile(stage/"vin.frames.jsonl");
  std::ofstream summary(stage/"summary.txt",std::ios::trunc);
  summary<<report<<"session_format=vin_raw_v1\naps_frames="<<counts[1]<<"\nevs_packets="<<counts[0]
  <<"\naps_observed_fps="<<fps<<"\naps_width=1632\naps_height=1224\nevs_width=768\nevs_height=608"
  <<"\naps_storage_format=RAW10_16LE_with_stride\ngray8_frames=0\naps_paired_timestamps=0"
- <<"\nraw_integrity=checked_write_close_size_and_fsync_no_payload_checksum_or_readback"
+ <<"\ndurability="<<(durable?"fsync_complete":"kernel_writeback_pending")
+ <<"\nraw_integrity="<<(durable?"checked_write_close_size_and_fsync":"checked_write_close_size")
  <<"\ncompress_ns=0\nverify_ns=0\nwrite_ns="<<writeNs<<"\nsync_ns="<<syncNs
  <<"\nsave_file_bytes="<<(offsets[0]+offsets[1])<<"\nsave_seconds="<<(ns()-begin)/1e9<<'\n';
- checkedClose(summary);RecordingStorage::syncFile(stage/"summary.txt");
+ checkedClose(summary);if(durable)RecordingStorage::syncFile(stage/"summary.txt");
  for(const char* name:{"aps.vin.bin","evs.vin.bin","vin.frames.jsonl"}) {
   if(fs::exists(o.output/name))fs::remove(o.output/name);fs::rename(stage/name,o.output/name);
  }
- RecordingStorage::syncFile(o.output);
+ if(durable)RecordingStorage::syncFile(o.output);
  if(fs::exists(o.output/"summary.txt"))fs::remove(o.output/"summary.txt");
  fs::rename(stage/"summary.txt",o.output/"summary.txt");
- try{RecordingStorage::syncFile(o.output);}catch(...){fs::rename(o.output/"summary.txt",stage/"summary.txt");throw;}
+ try{if(durable)RecordingStorage::syncFile(o.output);}catch(...){fs::rename(o.output/"summary.txt",stage/"summary.txt");throw;}
  fs::remove(o.output/"recording.storage");
- std::cout<<"Raw VIN saved and synced in "<<(ns()-begin)/1e9<<" seconds; bytes="<<(offsets[0]+offsets[1])<<std::endl;
+ const double elapsed=(ns()-begin)/1e9;
+ std::cout<<(durable?"Raw VIN saved and synced in ":"Native buffered VIN closed in ")<<elapsed<<" seconds; bytes="<<(offsets[0]+offsets[1])<<" throughput_MiB_s="<<((offsets[0]+offsets[1])/1048576.0/elapsed)<<std::endl;
 }
 static void saveFast(const Options& o,const MemoryArena& arena,double fps,const std::string& report,bool quick=false) {
 #ifndef HVS_HAVE_ZSTD

@@ -10,6 +10,7 @@ I2C_ADDRESS="0x3c"
 APS_GAIN_DB=0
 OUTPUT="/app/recordings/gain0_new"
 SAVE_FORMAT="fast"
+WAIT_SAVE=0
 PREVIEW_IMAGE=0
 
 while [[ $# -gt 0 ]]; do
@@ -41,11 +42,14 @@ while [[ $# -gt 0 ]]; do
         --preview-image)
             PREVIEW_IMAGE=1; shift
             ;;
+        --wait-save)
+            WAIT_SAVE=1; shift
+            ;;
         --output)
             OUTPUT="$2"; shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--save-format fast|raw|zstd|full] [--output PATH]"
+            echo "Usage: $0 [--x5-vin-bypass 0|1] [--storage MODE] [--seconds N] [--max-mib N] [--i2c-bus N] [--i2c-address ADDR] [--aps-gain-db DB] [--save-format fast|native|raw|zstd|full] [--output PATH]"
             echo "  --x5-vin-bypass 0|1     pass --x5-vin-bypass to hvs.py when 1 (default: 1)"
             echo "  --storage MODE          storage mode (default: memory)"
             echo "  --seconds N             recording duration in seconds (default: 5)"
@@ -53,8 +57,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --i2c-bus N             I2C bus number (default: 6)"
             echo "  --i2c-address ADDR      I2C address (default: 0x3c)"
             echo "  --aps-gain-db DB        APS gain in dB (default: 0)"
-            echo "  --save-format FORMAT     fast: low-CPU compressed VIN; raw: native VIN; zstd: verified compression; full: RAW + AVI/events (default: fast)"
+            echo "  --save-format FORMAT     fast: background compressed VIN; native: buffered RAW; raw: durable RAW; zstd: verified compression; full: RAW + AVI/events (default: fast)"
             echo "  --output PATH           where to save recording files (default: /app/recordings/gain0_new)"
+            echo "  --wait-save             wait for fast/native save completion (default: background after capture)"
             echo "  --preview-image         save only aps_preview.png with AVI playback brightness; no RAW/event/AVI"
             exit 0
             ;;
@@ -76,6 +81,7 @@ if [[ "$PREVIEW_IMAGE" == "1" ]]; then
 fi
 
 ARGS=(--storage "$STORAGE" --seconds "$SECONDS_ARG" --max-mib "$MAX_MIB" --i2c-bus "$I2C_BUS" --i2c-address "$I2C_ADDRESS" --aps-gain-db "$APS_GAIN_DB" --save-format "$SAVE_FORMAT" --output "$OUTPUT")
+if [[ "$WAIT_SAVE" == "1" ]]; then ARGS+=(--wait-save); fi
 if [[ "$X5_VIN_BYPASS" == "1" ]]; then ARGS+=(--x5-vin-bypass); fi
 
 python3 hvs.py record "${ARGS[@]}"

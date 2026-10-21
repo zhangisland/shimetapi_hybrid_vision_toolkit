@@ -138,3 +138,15 @@ hvs_enable_zstd(player_main_compile)
 if(HVS_ZSTD_LIBRARY AND Python3_Interpreter_FOUND)
  set_property(TEST vin_record_lifecycle APPEND PROPERTY ENVIRONMENT HVS_ARCHIVE_TESTS=1)
 endif()
+
+if(Python3_Interpreter_FOUND)
+ add_test(NAME vin_background_lifecycle COMMAND ${Python3_EXECUTABLE} -m unittest discover
+     -s "${CMAKE_CURRENT_SOURCE_DIR}" -p test_background_recording.py)
+ set_tests_properties(vin_background_lifecycle PROPERTIES
+     ENVIRONMENT "HVS_VIN_FAKE=$<TARGET_FILE:vin_record_fake>" TIMEOUT 30)
+ # Both synthetic recorders exercise the real process-wide camera lock.
+ set_tests_properties(vin_record_lifecycle vin_background_lifecycle PROPERTIES RUN_SERIAL TRUE)
+ if(UNIX AND EXISTS "/dev/shm")
+  set_property(TEST vin_record_lifecycle vin_background_lifecycle APPEND PROPERTY ENVIRONMENT TMPDIR=/dev/shm)
+ endif()
+endif()

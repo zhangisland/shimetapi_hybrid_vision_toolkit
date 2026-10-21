@@ -1,5 +1,7 @@
 # HVS quick save: board validation, 2026-10-21
 
+> Historical fsync-waiting measurements. These are not directly comparable with the vendor close-only speed display or the new foreground handoff time. See HVS_TURNAROUND_VALIDATION_20261022.md for the corrected comparison and background workflow.
+
 Board: `root@10.129.113.92`, repository `/root/zhangsr/shimetapi_hybrid_vision_toolkit`, branch `hvs_quick_save`.
 
 ## Implementation and choice of default

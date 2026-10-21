@@ -1,5 +1,27 @@
 # X5：快速保存、按需回放和纯预览
 
+## 2026-10-22：采集周转速度更新
+
+`scripts/record.sh` 默认 `fast`：停止采集、关闭相机并释放采集锁后，前台返回，原进程继续后台压缩和 fsync；不再等这部分后处理。终端的 `CAPTURE FINISHED` 表示相机可再次使用，**不是文件已保存完成**。`summary.txt` 才是最终完成标记。
+
+```bash
+bash scripts/record.sh --save-format fast --seconds 15 --max-mib 2304 \
+  --output /app/recordings/new_session
+python3 hvs.py status --output /app/recordings/new_session
+# 如需原来那样等待全部保存完成：
+bash scripts/record.sh --save-format fast --wait-save --seconds 15 \
+  --max-mib 2304 --output /app/recordings/new_session_wait
+# 与厂商相同的无压缩、close-only 完成口径（仍可回放/导出）：
+bash scripts/record.sh --save-format native --wait-save --seconds 3 \
+  --max-mib 640 --output /app/recordings/native_new
+```
+
+`native` 写 `.vin.bin`，检查写入/关闭/文件大小，但不等待 fsync，summary 标为 `durability=kernel_writeback_pending`；其“完成”不等于断电持久化确认。`raw` 保留同步 raw+fsync 语义。`fast` / `native` 不加 `--wait-save` 时均后台保存；其它模式保留同步行为。
+
+每个后台任务的 PID、启动标识和日志位置在 `writer.json` 中，日志为会话目录旁的 `<会话名>.record.log`。`status` 区分 capturing、saving、complete、保存失败待重试和进程中断；失败时原进程保留 RAM，修复存储后创建 `retry.request`。后台任务仍占用 RAM；下一段启动按当前 MemAvailable 校验预算，不能在 SD 卡吞吐不足时无限排队。未修改系统 dirty_ratio、swap 等全局设置。
+
+两段 15 秒实测，采集结束到前台返回分别 0.905 s、0.911 s；第二段完整采集结束时第一段仍在保存。完整指标见 `HVS_TURNAROUND_VALIDATION_20261022.md`。
+
 ## 板端执行 pipeline
 
 源码已部署到本次测试板。板端执行（输出目录必须是新目录）：
@@ -15,7 +37,7 @@ python3 hvs.py live --x5-vin-bypass -- \
   --aps-gain-db 0 --i2c-bus 6 --preview-width 960
 
 # 5 秒实际采集；预热及停止后保存另计
-python3 hvs.py record --x5-vin-bypass --storage memory --save-format fast \
+python3 hvs.py record --x5-vin-bypass --storage memory --save-format fast --wait-save \
   --output /app/recordings/fast_new --seconds 5 --max-mib 1024 \
   --aps-gain-db 0 --i2c-bus 6
 
@@ -46,20 +68,21 @@ python3 hvs.py stop --output /app/recordings/full_new
 
 ## 数据保存与恢复
 
-采集阶段：两路 VIN 独立取帧 → 每个 DMA 缓冲复制一次到有界进程内 arena → 立即归还上游缓冲。停止接收、线程结束之后，才开始保存；没有边采集边写盘线程。
+采集阶段：两路 VIN 独立取帧 → 每个 DMA 缓冲复制一次到有界进程内 arena → 立即归还上游缓冲。本会话停止接收、线程结束后才开始保存；此时相机锁释放，后续会话可在本会话后台保存期间采集。
 
 保存模式：
 
 | 模式 | 策略 | 输出 |
 |---|---|---|
-| `fast`（record.sh 默认） | Zstandard level -1，逐帧快速压缩，保留帧校验和；不计算 FNV、不整段回读解压；关闭文件并 fsync 后发布 | `.vin.zst` + 索引 + summary |
+| `fast`（record.sh 默认，后台） | Zstandard level -1，逐帧快速压缩，保留帧校验和；不计算 FNV、不整段回读解压；关闭文件并 fsync 后发布 | `.vin.zst` + 索引 + summary |
+| `native` | 原生 close-only 口径，不等待 fsync | `.vin.bin` + 索引 + summary |
 | `raw` | 原生示例的 DDR 缓存 + 4 MiB 顺序直写，不编码、不压缩、不逐字节哈希或回读；每路只写一份；fsync 后发布 | `.vin.bin` + 索引 + summary |
 | `zstd` | 原来的 fast：level 1 + FNV + 完整回读、解压、逐字节比对 | `.vin.zst` + 索引 + summary |
 | `full`（hvs.py 默认） | 原始数据 + 兼容 AVI/events + 完整校验 | 两份 `.vin.bin` + `.avi` + `.raw` + 索引 + summary |
 
 参考代码：`/app/multimedia_samples/sample_apx003cc/sample_evs_release/evs_mode/01_evs_live_player/evs_live_player.cpp`。原生示例只保存原始 EVS 数据，4 MiB 顺序复制，关闭文件但不等待 fsync。本项目保存双路 APS+EVS，保留 RAW10、stride/padding、帧号和时间戳；不会将只进入页缓存的数据当作已持久化。
 
-本板 15 秒双路原始数据约 2.10 GiB，实测 `raw` 保存并同步需要 **211.13 秒**。因此不将无压缩直写作为默认最快模式；SD 卡带宽较低时，低开销压缩减少写盘量更有效。实际速度取决于场景压缩率和存储设备，详细结果见 `HVS_QUICK_SAVE_VALIDATION.md`。
+历史测量：15 秒双路原始数据约 2.10 GiB，`raw` 保存并同步为 211.13 秒。此数字包含等待 fsync，且数据量是厂商截图 418 MiB 的约 5 倍，**不能与厂商 close-only 的 236.96 MiB/s 直接比较**。该指标也不等于新版后台模式的前台等待时间。历史细项见 `HVS_QUICK_SAVE_VALIDATION.md`，更新对照见 `HVS_TURNAROUND_VALIDATION_20261022.md`。
 
 `fast` / `zstd` 为 `session_format=vin_zstd_v1`，旧压缩录制仍可回放和导出；两个 `.zst` 是 **HVZ1 容器**，内含逐帧 Zstandard 数据，不是普通 zstd 文件。`raw` 为 `vin_raw_v1`，输出 `aps.vin.bin`、`evs.vin.bin`。三种模式都必须保留 `vin.frames.jsonl` 和 `summary.txt`，都支持同一套 play / export-recording 命令。快速保存不在保存时完整验证介质内容：`fast` 在读取时验证 Zstandard 校验和，`raw` 不能检测同长度静默损坏；需保存后立即全面校验时使用 `zstd`。
 
@@ -80,7 +103,7 @@ bash scripts/record.sh --save-format zstd --output /app/recordings/verified_new
 
 三种原始保存模式均保留原始字节、host/VIN时间戳、帧序号、尺寸、stride和格式。只有 `zstd` 模式在保存后全部解压，与内存原始数据逐字节比较。导出也检查每块校验和，恢复完整 `.vin.bin` 和兼容文件。播放器 APS 按索引读取原始帧或解压所需帧，不先导出 AVI。EVS 仍需扫描解码建立回放序列，启动不是零等待。
 
-保存用 `saving.partial` 暂存，summary 最后发布；只有 `status=complete` 才是成功会话。保存失败时进程保留唯一内存副本，修复空间或权限后，在输出目录创建 `retry.request` 重试。导出失败则源会话仍可重试到新目录。纯内存录制无法恢复断电、kill -9或进程崩溃前尚未保存的数据。
+保存用 `saving.partial` 暂存，summary 最后发布；只有最终 summary 的 `status=complete` 才是成功会话。`capture.done` 中的 complete 只说明采集成功，不能代替 summary。保存失败时进程保留唯一内存副本，修复空间或权限后，在输出目录创建 `retry.request` 重试。导出失败则源会话仍可重试到新目录。纯内存录制无法恢复断电、kill -9或进程崩溃前尚未保存的数据。
 
 `--max-mib` 包含预留32MiB工作空间，其余给原始数据与元数据；压缩不会增加采集时可装的帧数。启动检查可用内存并留出系统余量；本板实测 mlock成功、swap关闭。达容量上限停止，不覆盖、不偷偷落盘。当前预算范围64～2048MiB。导出同样需要足够容纳解压后原始数据的预算。空间检查采用保守上界，压缩率不能事先保证。
 
