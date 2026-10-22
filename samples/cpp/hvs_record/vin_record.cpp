@@ -46,12 +46,12 @@ static Options parse(int argc,char** argv) {
    if(k=="--preview") {o.preview=true;continue;}
    if(k=="--snapshot") {o.preview=true;o.snapshot=true;continue;}
    if(k=="--no-verify") {o.verifyRegs=false;continue;}
-   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
+   if(k=="--help") {std::cout<<"Native dual VIN recorder v1: --output NEW --seconds 5 --max-mib 1024 [--warmup 1] [--diagnostic record|receive|copy] [--save-format full|fast|native|raw|zstd] [--export-session SOURCE] [--aps-gain-db 0] --i2c-bus VERIFIED [--preview] [--no-verify]\n"; std::exit(0);}
    if(i+1==argc) throw std::runtime_error("Missing value: "+k);
    std::string v=argv[++i];
    if(k=="--aps-bayer") {if(v!="none"&&v!="gbrg"&&v!="rggb"&&v!="bggr"&&v!="grbg")throw std::runtime_error("Invalid preview Bayer pattern");o.previewBayer=v;continue;}
    if(k=="--export-session") {o.exportSession=v;continue;}
-   if(k=="--save-format") {if(v!="fast"&&v!="full")throw std::runtime_error("save-format fast|full");o.saveFormat=v;continue;}
+   if(k=="--save-format") {if(v!="fast"&&v!="full"&&v!="zstd"&&v!="raw"&&v!="native")throw std::runtime_error("save-format fast|native|raw|zstd|full");o.saveFormat=v;continue;}
    if(k=="--output") {o.output=v;continue;}
    if(k=="--storage") {if(v!="memory") throw std::runtime_error("native VIN requires --storage memory; legacy SDK provides disk baseline");continue;}
    if(k=="--ram-dir") continue; // deprecated compatibility; no tmpfs is used
@@ -409,6 +409,15 @@ static int run(const Options& o) {
  stop=true;evs.join();aps.join(); // no DMA leases survive these joins
  if(sensor&&o.verifyRegs) {try {apx::verify(*sensor,regs);} catch(const std::exception& e) {error+=e.what();}}
  owner.reset();sensor.reset(); // stop hardware before any bulk output
+#ifdef __linux__
+ // The writer no longer owns the sensor. A new process may capture while it saves.
+ ::close(captureLock);captureLock=-1;
+ // Discard only unused whole arena pages; retain every captured byte for retry.
+ const uintptr_t page=uintptr_t(sysconf(_SC_PAGESIZE));
+ const uintptr_t spare=(reinterpret_cast<uintptr_t>(arena.data())+arena.used()+page-1)&~(page-1);
+ const uintptr_t limit=(reinterpret_cast<uintptr_t>(arena.data())+arena.capacity())&~(page-1);
+ if(limit>spare){::munlock(reinterpret_cast<void*>(spare),limit-spare);::madvise(reinterpret_cast<void*>(spare),limit-spare,MADV_DONTNEED);}
+#endif
  for(auto& e:errors) if(!e.empty()) error+="; "+e;
  if(full) reason="capacity";
  if(!stats[0].frames||!stats[1].frames) error+="; one stream absent";
@@ -416,7 +425,7 @@ static int run(const Options& o) {
  std::ostringstream report;
  report<<std::setprecision(12)<<"status="<<(error.empty()?"complete":"failed")<<"\nreason="<<(error.empty()?reason:error)
    <<"\nbackend=native_dual_vin_v1\nstorage=process_memory\ndiagnostic="<<o.diagnostic
-   <<"\ncapture_seconds="<<seconds<<"\nwarmup_seconds="<<o.warmup<<"\nmemory_budget_bytes="<<o.maxBytes
+   <<"\ncapture_stop_host_ns="<<stopped<<"\ncapture_seconds="<<seconds<<"\nwarmup_seconds="<<o.warmup<<"\nmemory_budget_bytes="<<o.maxBytes
    <<"\nbuffer_capacity_bytes="<<arena.capacity()<<"\nbuffer_peak_bytes="<<arena.used()<<"\nmlocked="<<locked
    <<"\nqueue_depth=0\nencoding_during_capture=0\nwriting_during_capture=0\ncopy_count_per_plane="<<(o.diagnostic=="receive"?0:1)
    <<"\nupstream_sensor_loss=unknown\nVIN_frame_ids_not_sensor_counters=true\nAE=absent_no_ISP_node"
@@ -437,8 +446,15 @@ static int run(const Options& o) {
    std::cout<<"Diagnostic only: payload intentionally discarded; no complete recording marker\n";
  } else {
    for(;;) {
-     try {if(o.saveFormat=="fast")saveFast(o,arena,stats[1].fps(),report.str());else save(o,arena,stats[1].fps(),report.str());break;}
+     try {
+       fs::remove(o.output/"save.failed");
+       if(!fs::exists(o.output/"capture.done")) {
+         std::ofstream handoff(o.output/"capture.done.partial");handoff<<report.str();checkedClose(handoff);
+         fs::rename(o.output/"capture.done.partial",o.output/"capture.done");
+       }
+       if(o.saveFormat=="raw"||o.saveFormat=="native")saveQuick(o,arena,stats[1].fps(),report.str(),o.saveFormat=="raw");else if(o.saveFormat=="fast"||o.saveFormat=="zstd")saveFast(o,arena,stats[1].fps(),report.str(),o.saveFormat=="fast");else save(o,arena,stats[1].fps(),report.str());break;}
      catch(const std::exception& e) {
+       {std::ofstream failed(o.output/"save.failed");failed<<e.what()<<'\n';}
        std::cerr<<"SAVE FAILED: "<<e.what()<<"\nAll input retained in this process. Repair destination, then: touch '"<<(o.output/"retry.request").string()<<"'\nDo NOT kill the process; pure RAM cannot survive power loss/SIGKILL.\n";
        // Signals do not discard the sole copy. A filesystem request retries
        // the complete save transaction, including files partly published.
@@ -449,14 +465,14 @@ static int run(const Options& o) {
  }
 #ifdef __linux__
  if(locked) munlock(arena.data(),arena.capacity());
- ::close(captureLock);
+ if(captureLock>=0)::close(captureLock);
 #endif
  return error.empty()?0:2;
 }
 int main(int argc,char** argv) {
  try {const auto options=parse(argc,argv);if(!options.exportSession.empty())return exportFast(options);
 #ifndef HVS_HAVE_ZSTD
- if(options.saveFormat=="fast")throw std::runtime_error("Fast save requires a zstd-enabled build");
+ if(options.saveFormat=="zstd"||options.saveFormat=="fast")throw std::runtime_error("Zstd save requires a zstd-enabled build");
 #endif
  if(options.preview) {
 #ifdef HVS_VIN_PREVIEW

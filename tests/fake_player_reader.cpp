@@ -12,6 +12,8 @@ HybridReader::HybridReader()=default;
 HybridReader::~HybridReader() {fake_player::legacy.erase(this);}
 bool HybridReader::open(const std::string& evs,const std::string&) {next_aps_index_=0;evs_open_=std::filesystem::path(evs).filename()=="synthetic";fake_player::legacy[this]=evs_open_&&std::filesystem::path(evs).has_parent_path();return true;}
 double HybridReader::apsFps() const {return 29.79;}
+uint32_t HybridReader::width() const {return 32;}
+uint32_t HybridReader::height() const {return 32;}
 uint32_t HybridReader::apsFrameCount() const {return 24;}
 bool HybridReader::readApsFrame(Frame& f,EvsTimestamp* ts) {
     if(next_aps_index_>=24) return false;

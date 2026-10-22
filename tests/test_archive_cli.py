@@ -5,6 +5,19 @@ from unittest import mock
 import hvs
 
 class ArchiveCliTests(unittest.TestCase):
+    def test_direct_play_quick_raw(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'summary.txt').write_text('status=complete\nsession_format=vin_raw_v1\naps_frames=2\ngray8_frames=0\n')
+            for name in ['aps.vin.bin','evs.vin.bin']:
+                (root/name).write_bytes(b'raw')
+            with mock.patch.object(hvs.platform,'system',return_value='Linux'), mock.patch.object(hvs,'executable',return_value=Path('/fake/player')),mock.patch.object(hvs,'run') as run:
+                hvs.main(['play','--output',tmp,'--dump-timestamps'])
+                cmd=run.call_args.args[0]
+                self.assertEqual(Path(cmd[1]).name,'evs.vin.bin')
+                self.assertEqual(Path(cmd[2]).name,'aps.vin.bin')
+                self.assertEqual(cmd[cmd.index('--aps-bayer')+1],'gbrg')
+
     def test_direct_play_without_four_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

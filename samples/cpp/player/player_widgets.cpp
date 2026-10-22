@@ -884,7 +884,7 @@ void printUsage(const char* prog) {
 
 bool dumpTimestamps(const std::string& raw_path, const std::string& avi_path,
                     std::ostream& out) {
-    if (std::filesystem::path(avi_path).extension()==".zst") {
+    if (hv_archive::isArchive(avi_path)) {
         try {
             out << "stream,packet_index,vin_timestamp,host_receive_ns,source\n";
             for (const auto& path : {raw_path,avi_path}) {
