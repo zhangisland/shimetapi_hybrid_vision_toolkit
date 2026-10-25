@@ -47,8 +47,13 @@ def recording_status(folder):
 def record_in_background(command, folder, env):
     # Spawn BEFORE the camera/SDK starts. No fork from a multithreaded SDK process.
     _background_writers[:] = [p for p in _background_writers if p.poll() is None]
-    log_path = folder.parent/(folder.name+'.record.log')
-    with log_path.open('x') as log:
+    folder = Path(folder)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    log_path = folder / (folder.name + '.record.log')
+    # The recorder must create output itself. Linux keeps the open log writable
+    # after it is moved into the directory created by the recorder.
+    pending_log_path = folder.parent / (folder.name + '.record.log')
+    with pending_log_path.open('x') as log:
         proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                 env=env, start_new_session=True)
     _background_writers.append(proc)
@@ -58,13 +63,14 @@ def record_in_background(command, folder, env):
     registered = False
     started = time.monotonic()
     try:
-        with log_path.open() as tail:
+        with pending_log_path.open() as tail:
             while True:
                 try:
                     new = tail.read()
                     if new:
                         print(new, end='', flush=True)
                     if folder.is_dir() and not registered:
+                        pending_log_path.rename(log_path)
                         (folder/'writer.json').write_text(json.dumps(job)+'\n')
                         registered = True
                     code = proc.poll()
